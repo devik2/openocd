@@ -527,12 +527,14 @@ static int stm32lx_write_half_pages(struct flash_bank *bank, const uint8_t *buff
 	/* Loop while there are bytes to write */
 	while (count > 0) {
 		uint32_t this_count;
-		this_count = (count > buffer_size) ? buffer_size : count;
+		this_count = (count > hp_nb) ? hp_nb : count;
 
 		/* Write the next half pages */
 		retval = target_write_buffer(target, source->address, this_count, buffer);
 		if (retval != ERROR_OK)
 			break;
+		printf("wrfl cnt %d addr %X src %lX r2=%d\n",
+				count,address,source->address,this_count / 4);
 
 		/* 4: Store useful information in the registers */
 		/* the destination address of the copy (R0) */
