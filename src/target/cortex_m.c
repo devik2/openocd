@@ -215,6 +215,8 @@ static int cortex_m_enable_fpb(struct target *target)
 	return ERROR_FAIL;
 }
 
+#define DCC_EMU 0x200007f8
+
 static int cortex_m_endreset_event(struct target *target)
 {
 	int i;
@@ -233,7 +235,7 @@ static int cortex_m_endreset_event(struct target *target)
 	LOG_DEBUG("DCB_DEMCR = 0x%8.8" PRIx32 "", dcb_demcr);
 
 	/* this register is used for emulated dcc channel */
-	retval = mem_ap_write_u32(armv7m->debug_ap, DCB_DCRDR, 0);
+	retval = mem_ap_write_u32(armv7m->debug_ap, DCC_EMU, 0);
 	if (retval != ERROR_OK)
 		return retval;
 
@@ -2066,7 +2068,7 @@ static int cortex_m_dcc_read(struct target *target, uint8_t *value, uint8_t *ctr
 	uint8_t buf[2];
 	int retval;
 
-	retval = mem_ap_read_buf_noincr(armv7m->debug_ap, buf, 2, 1, DCB_DCRDR);
+	retval = mem_ap_read_buf_noincr(armv7m->debug_ap, buf, 2, 1, DCC_EMU);
 	if (retval != ERROR_OK)
 		return retval;
 
@@ -2080,7 +2082,7 @@ static int cortex_m_dcc_read(struct target *target, uint8_t *value, uint8_t *ctr
 	 * signify we have read data */
 	if (dcrdr & (1 << 0)) {
 		target_buffer_set_u16(target, buf, 0);
-		retval = mem_ap_write_buf_noincr(armv7m->debug_ap, buf, 2, 1, DCB_DCRDR);
+		retval = mem_ap_write_buf_noincr(armv7m->debug_ap, buf, 2, 1, DCC_EMU);
 		if (retval != ERROR_OK)
 			return retval;
 	}
@@ -2131,8 +2133,10 @@ static int cortex_m_handle_target_request(void *priv)
 			request = data;
 			for (int i = 1; i <= 3; i++) {
 				retval = cortex_m_dcc_read(target, &data, &ctrl);
-				if (retval != ERROR_OK)
+				if (retval != ERROR_OK) {
+					printf("SLOOW!\n");
 					return retval;
+				}
 				request |= ((uint32_t)data << (i * 8));
 			}
 			target_request(target, request);
