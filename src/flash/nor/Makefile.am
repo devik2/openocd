@@ -25,6 +25,7 @@ NOR_DRIVERS = \
 	%D%/faux.c \
 	%D%/fm3.c \
 	%D%/fm4.c \
+	%D%/ht32f5xxx.c \
 	%D%/jtagspi.c \
 	%D%/kinetis.c \
 	%D%/kinetis_ke.c \
