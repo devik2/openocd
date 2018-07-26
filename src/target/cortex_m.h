@@ -191,6 +191,9 @@ struct cortex_m_common {
 	struct armv7m_common armv7m;
 
 	int apsel;
+
+	uint32_t dcc_emu_address;
+	uint32_t dcc_emu_width;
 };
 
 static inline struct cortex_m_common *

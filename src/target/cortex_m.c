@@ -65,12 +65,13 @@ static int cortexm_dap_read_coreregister_u32(struct target *target,
 	uint32_t *value, int regnum)
 {
 	struct armv7m_common *armv7m = target_to_armv7m(target);
+	struct cortex_m_common *cortex_m = target_to_cm(target);
 	int retval;
 	uint32_t dcrdr;
 
 	/* because the DCB_DCRDR is used for the emulated dcc channel
 	 * we have to save/restore the DCB_DCRDR when used */
-	if (target->dbg_msg_enabled) {
+	if (target->dbg_msg_enabled && cortex_m->dcc_emu_address == DCB_DCRDR) {
 		retval = mem_ap_read_u32(armv7m->debug_ap, DCB_DCRDR, &dcrdr);
 		if (retval != ERROR_OK)
 			return retval;
@@ -84,7 +85,7 @@ static int cortexm_dap_read_coreregister_u32(struct target *target,
 	if (retval != ERROR_OK)
 		return retval;
 
-	if (target->dbg_msg_enabled) {
+	if (target->dbg_msg_enabled && cortex_m->dcc_emu_address == DCB_DCRDR) {
 		/* restore DCB_DCRDR - this needs to be in a separate
 		 * transaction otherwise the emulated DCC channel breaks */
 		if (retval == ERROR_OK)
@@ -228,7 +229,7 @@ static int cortex_m_endreset_event(struct target *target)
 	LOG_DEBUG("DCB_DEMCR = 0x%8.8" PRIx32 "", dcb_demcr);
 
 	/* this register is used for emulated dcc channel */
-	retval = mem_ap_write_u32(armv7m->debug_ap, DCB_DCRDR, 0);
+	retval = mem_ap_write_u32(armv7m->debug_ap, cortex_m->dcc_emu_address, 0);
 	if (retval != ERROR_OK)
 		return retval;
 
@@ -2147,25 +2148,32 @@ int cortex_m_examine(struct target *target)
 static int cortex_m_dcc_read(struct target *target, uint8_t *value, uint8_t *ctrl)
 {
 	struct armv7m_common *armv7m = target_to_armv7m(target);
-	uint16_t dcrdr;
-	uint8_t buf[2];
+	struct cortex_m_common *cortex_m = target_to_cm(target);
+	uint8_t buf[8];
 	int retval;
+	int wide = cortex_m->dcc_emu_width == 32;
 
-	retval = mem_ap_read_buf_noincr(armv7m->debug_ap, buf, 2, 1, DCB_DCRDR);
+	retval = mem_ap_read_buf(armv7m->debug_ap, buf, 
+		wide ? 4:2, wide ? 2:1, cortex_m->dcc_emu_address);
 	if (retval != ERROR_OK)
 		return retval;
 
-	dcrdr = target_buffer_get_u16(target, buf);
-	*ctrl = (uint8_t)dcrdr;
-	*value = (uint8_t)(dcrdr >> 8);
-
+	if (wide) {
+		*ctrl = (uint8_t)target_buffer_get_u16(target, buf);
+		uint32_t v = target_buffer_get_u32(target, buf+4);
+		memcpy(value,&v,4);
+	} else {
+		uint16_t dcrdr = target_buffer_get_u16(target, buf);
+		*ctrl = (uint8_t)dcrdr;
+		*value = (uint8_t)(dcrdr >> 8);
+	}
 	LOG_DEBUG("data 0x%x ctrl 0x%x", *value, *ctrl);
 
 	/* write ack back to software dcc register
 	 * signify we have read data */
-	if (dcrdr & (1 << 0)) {
+	if (*ctrl & (1 << 0)) {
 		target_buffer_set_u16(target, buf, 0);
-		retval = mem_ap_write_buf_noincr(armv7m->debug_ap, buf, 2, 1, DCB_DCRDR);
+		retval = mem_ap_write_buf_noincr(armv7m->debug_ap, buf, 2, 1, cortex_m->dcc_emu_address);
 		if (retval != ERROR_OK)
 			return retval;
 	}
@@ -2176,15 +2184,15 @@ static int cortex_m_dcc_read(struct target *target, uint8_t *value, uint8_t *ctr
 static int cortex_m_target_request_data(struct target *target,
 	uint32_t size, uint8_t *buffer)
 {
-	uint8_t data;
 	uint8_t ctrl;
 	uint32_t i;
+	struct cortex_m_common *cortex_m = target_to_cm(target);
+	int step = cortex_m->dcc_emu_width == 32 ? 4 : 1;
 
-	for (i = 0; i < (size * 4); i++) {
-		int retval = cortex_m_dcc_read(target, &data, &ctrl);
+	for (i = 0; i < (size * 4); i += step) {
+		int retval = cortex_m_dcc_read(target, buffer+i, &ctrl);
 		if (retval != ERROR_OK)
 			return retval;
-		buffer[i] = data;
 	}
 
 	return ERROR_OK;
@@ -2193,6 +2201,9 @@ static int cortex_m_target_request_data(struct target *target,
 static int cortex_m_handle_target_request(void *priv)
 {
 	struct target *target = priv;
+	struct cortex_m_common *cortex_m = target_to_cm(target);
+	int wide = cortex_m->dcc_emu_width == 32;
+	
 	if (!target_was_examined(target))
 		return ERROR_OK;
 
@@ -2200,11 +2211,11 @@ static int cortex_m_handle_target_request(void *priv)
 		return ERROR_OK;
 
 	if (target->state == TARGET_RUNNING) {
-		uint8_t data;
+		uint8_t data[4];
 		uint8_t ctrl;
 		int retval;
 
-		retval = cortex_m_dcc_read(target, &data, &ctrl);
+		retval = cortex_m_dcc_read(target, data, &ctrl);
 		if (retval != ERROR_OK)
 			return retval;
 
@@ -2213,13 +2224,12 @@ static int cortex_m_handle_target_request(void *priv)
 			uint32_t request;
 
 			/* we assume target is quick enough */
-			request = data;
-			for (int i = 1; i <= 3; i++) {
-				retval = cortex_m_dcc_read(target, &data, &ctrl);
+			for (int i = 1; i <= 3 && !wide; i++) {
+				retval = cortex_m_dcc_read(target, data+i, &ctrl);
 				if (retval != ERROR_OK)
 					return retval;
-				request |= ((uint32_t)data << (i * 8));
 			}
+			memcpy(&request,data,sizeof(request));
 			target_request(target, request);
 		}
 	}
@@ -2245,6 +2255,9 @@ static int cortex_m_init_arch_info(struct target *target,
 	/* default reset mode is to use srst if fitted
 	 * if not it will use CORTEX_M3_RESET_VECTRESET */
 	cortex_m->soft_reset_config = CORTEX_M_RESET_VECTRESET;
+
+	cortex_m->dcc_emu_address = DCB_DCRDR;
+	cortex_m->dcc_emu_width = 8;
 
 	armv7m->arm.dap = tap->dap;
 
@@ -2462,6 +2475,43 @@ COMMAND_HANDLER(handle_cortex_m_reset_config_command)
 	return ERROR_OK;
 }
 
+COMMAND_HANDLER(handle_cortex_m_dcc_emu_command)
+{
+	struct target *target = get_current_target(CMD_CTX);
+	struct cortex_m_common *cortex_m = target_to_cm(target);
+	int retval;
+
+	retval = cortex_m_verify_pointer(CMD_CTX, cortex_m);
+	if (retval != ERROR_OK)
+		return retval;
+
+	if (CMD_ARGC > 0) {
+		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], cortex_m->dcc_emu_width);
+		if (cortex_m->dcc_emu_width != 8 && 
+				cortex_m->dcc_emu_width != 32) {
+			command_print(CMD_CTX, "cortex_m dcc_emu: width can be 8 or 32 only");
+
+			return ERROR_OK;
+		}
+	}
+
+	if (CMD_ARGC > 1) {
+		if (strcmp(CMD_ARGV[1], "dcrdr") == 0)
+			cortex_m->dcc_emu_address = DCB_DCRDR;
+
+		else {
+			COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], 
+					cortex_m->dcc_emu_address);
+		}
+	}
+
+	command_print(CMD_CTX, "cortex_m dcc_emu address 0x%8.8" PRIx32
+			" width %d", 
+			cortex_m->dcc_emu_address, cortex_m->dcc_emu_width);
+
+	return ERROR_OK;
+}
+
 static const struct command_registration cortex_m_exec_command_handlers[] = {
 	{
 		.name = "maskisr",
@@ -2483,6 +2533,13 @@ static const struct command_registration cortex_m_exec_command_handlers[] = {
 		.mode = COMMAND_ANY,
 		.help = "configure software reset handling",
 		.usage = "['srst'|'sysresetreq'|'vectreset']",
+	},
+	{
+		.name = "dcc_emu",
+		.handler = handle_cortex_m_dcc_emu_command,
+		.mode = COMMAND_ANY,
+		.help = "configure DCC emulation width and address",
+		.usage = "['8'|'32' ['dcrdr'|address]]",
 	},
 	COMMAND_REGISTRATION_DONE
 };
