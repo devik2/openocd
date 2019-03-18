@@ -1098,6 +1098,97 @@ static int jim_mcrmrc(Jim_Interp *interp, int argc, Jim_Obj * const *argv)
 	return JIM_OK;
 }
 
+static int jim_mcrrmrrc(Jim_Interp *interp, int argc, Jim_Obj * const *argv)
+{
+	struct command_context *context;
+	struct target *target;
+	struct arm *arm;
+	int retval;
+
+	context = current_command_context(interp);
+	assert(context != NULL);
+
+	target = get_current_target(context);
+	if (target == NULL) {
+		LOG_ERROR("%s: no current target", __func__);
+		return JIM_ERR;
+	}
+	if (!target_was_examined(target)) {
+		LOG_ERROR("%s: not yet examined", target_name(target));
+		return JIM_ERR;
+	}
+	arm = target_to_arm(target);
+	if (!is_arm(arm)) {
+		LOG_ERROR("%s: not an ARM", target_name(target));
+		return JIM_ERR;
+	}
+
+	if ((argc < 4) || (argc > 5)) {
+		LOG_ERROR("%s: wrong number of arguments", __func__);
+		return JIM_ERR;
+	}
+
+	int cpnum;
+	uint32_t op;
+	uint32_t CRm;
+	uint64_t value;
+	long l;
+
+	/* NOTE: parameter sequence matches ARM instruction set usage:
+	 *	MCRR	cpnum, opcode, Rt, Rt2, CRm
+	 *	MRRC	cpnum, opcode, Rt, Rt2, CRm
+	 * The "Rt" and "Rt2" are necessarily omitted; it uses Tcl mechanisms.
+	 */
+	retval = Jim_GetLong(interp, argv[1], &l);
+	if (retval != JIM_OK)
+		return retval;
+	if (l & ~0xf) {
+		LOG_ERROR("%s: %s %d out of range", __func__,
+			 "coprocessor", (int) l);
+		return JIM_ERR;
+	}
+	cpnum = l;
+
+	retval = Jim_GetLong(interp, argv[2], &l);
+	if (retval != JIM_OK)
+		return retval;
+	if (l & ~0xf) {
+		LOG_ERROR("%s: %s %d out of range", __func__,
+			"opcode", (int) l);
+		return JIM_ERR;
+	}
+	op = l;
+
+	retval = Jim_GetLong(interp, argv[3], &l);
+	if (retval != JIM_OK)
+		return retval;
+	if (l & ~0xf) {
+		LOG_ERROR("%s: %s %d out of range", __func__,
+			"CRm", (int) l);
+		return JIM_ERR;
+	}
+	CRm = l;
+
+	value = 0;
+	if (argc == 5) {
+		retval = Jim_GetLong(interp, argv[4], &l);
+		if (retval != JIM_OK)
+			return retval;
+
+		value = l;
+		retval = arm->mcrr(target, cpnum, op, CRm, value);
+		if (retval != ERROR_OK)
+			return JIM_ERR;
+	} else {
+		retval = arm->mrrc(target, cpnum, op, CRm, &value);
+		if (retval != ERROR_OK)
+			return JIM_ERR;
+		Jim_SetResult(interp, Jim_NewIntObj(interp, value));
+	}
+
+	return JIM_OK;
+}
+
 extern __COMMAND_HANDLER(handle_common_semihosting_command);
 extern __COMMAND_HANDLER(handle_common_semihosting_fileio_command);
 extern __COMMAND_HANDLER(handle_common_semihosting_resumable_exit_command);
@@ -1133,11 +1224,25 @@ static const struct command_registration arm_exec_command_handlers[] = {
 		.usage = "cpnum op1 CRn CRm op2 value",
 	},
 	{
+		.name = "mcrr",
+		.mode = COMMAND_EXEC,
+		.jim_handler = &jim_mcrrmrrc,
+		.help = "write coprocessor from two registers",
+		.usage = "cpnum op CRm value",
+	},
+	{
 		.name = "mrc",
 		.mode = COMMAND_EXEC,
 		.jim_handler = &jim_mcrmrc,
 		.help = "read coprocessor register",
 		.usage = "cpnum op1 CRn CRm op2",
+	},
+	{
+		.name = "mrrc",
+		.mode = COMMAND_EXEC,
+		.jim_handler = &jim_mcrrmrrc,
+		.help = "read coprocessor to two registers",
+		.usage = "cpnum op CRm",
 	},
 	{
 		.name = "semihosting",
@@ -1684,12 +1789,28 @@ static int arm_default_mrc(struct target *target, int cpnum,
 	return ERROR_FAIL;
 }
 
+static int arm_default_mrrc(struct target *target, int cpnum,
+	uint32_t op, uint32_t CRm,
+	uint64_t *value)
+{
+	LOG_ERROR("%s doesn't implement MRRC", target_type_name(target));
+	return ERROR_FAIL;
+}
+
 static int arm_default_mcr(struct target *target, int cpnum,
 	uint32_t op1, uint32_t op2,
 	uint32_t CRn, uint32_t CRm,
 	uint32_t value)
 {
 	LOG_ERROR("%s doesn't implement MCR", target_type_name(target));
+	return ERROR_FAIL;
+}
+
+static int arm_default_mcrr(struct target *target, int cpnum,
+	uint32_t op, uint32_t CRm,
+	uint64_t value)
+{
+	LOG_ERROR("%s doesn't implement MCRR", target_type_name(target));
 	return ERROR_FAIL;
 }
 
@@ -1712,8 +1833,12 @@ int arm_init_arch_info(struct target *target, struct arm *arm)
 
 	if (!arm->mrc)
 		arm->mrc = arm_default_mrc;
+	if (!arm->mrrc)
+		arm->mrrc = arm_default_mrrc;
 	if (!arm->mcr)
 		arm->mcr = arm_default_mcr;
+	if (!arm->mcrr)
+		arm->mcrr = arm_default_mcrr;
 
 	return ERROR_OK;
 }

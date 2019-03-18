@@ -214,11 +214,21 @@ struct arm {
 			uint32_t CRn, uint32_t CRm,
 			uint32_t *value);
 
+	/** Read coprocessor to two registers. */
+	int (*mrrc)(struct target *target, int cpnum,
+			uint32_t op, uint32_t CRm,
+			uint64_t *value);
+
 	/** Write coprocessor register.  */
 	int (*mcr)(struct target *target, int cpnum,
 			uint32_t op1, uint32_t op2,
 			uint32_t CRn, uint32_t CRm,
 			uint32_t value);
+
+	/** Write coprocessor from two registers. */
+	int (*mcrr)(struct target *target, int cpnum,
+			uint32_t op, uint32_t CRm,
+			uint64_t value);
 
 	void *arch_info;
 

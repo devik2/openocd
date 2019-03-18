@@ -198,6 +198,17 @@
 	(0xee100010 | (CRm) | ((op2) << 5) | ((CP) << 8) \
 	| ((Rd) << 12) | ((CRn) << 16) | ((op1) << 21))
 
+/* Move to two ARM registers from coprocessor
+ * CP: Coprocessor number
+ * op: Coprocessor opcode
+ * Rt: destination register 1
+ * Rt2: destination register 2
+ * CRm: coprocessor source register
+ */
+#define ARMV5_T_MRRC(CP, op, Rt, Rt2, CRm) \
+	(0xec500000 | (CRm) | ((op) << 4) | ((CP) << 8) \
+	| ((Rt) << 12) | ((Rt2) << 16))
+
 /* Move to coprocessor from ARM register
  * CP: Coprocessor number
  * op1: Coprocessor opcode
@@ -209,6 +220,17 @@
 #define ARMV4_5_MCR(CP, op1, Rd, CRn, CRm, op2) \
 	(0xee000010 | (CRm) | ((op2) << 5) | ((CP) << 8) \
 	| ((Rd) << 12) | ((CRn) << 16) | ((op1) << 21))
+
+/* Move to coprocessor from two ARM registers
+ * CP: Coprocessor nunber
+ * op: Coprocessor opcode
+ * Rt: destination register 1
+ * Rt2: destination register 2
+ * CRm: coprocessor source register
+ */
+#define ARMV5_T_MCRR(CP, op, Rt, Rt2, CRm) \
+	(0xec400000 | (CRm) | ((op) << 4) | ((CP) << 8) \
+	 | ((Rt) << 12) | ((Rt2) << 16))
 
 /* Breakpoint instruction (ARMv5)
  * Im: 16-bit immediate
