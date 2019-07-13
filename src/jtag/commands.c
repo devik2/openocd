@@ -144,6 +144,18 @@ void jtag_command_queue_reset(void)
 	next_command_pointer = &jtag_command_queue;
 }
 
+/**
+ * Copy a struct scan_field for insertion into the queue.
+ *
+ * This allocates a new copy of out_value using cmd_queue_alloc.
+ */
+void jtag_scan_field_clone(struct scan_field *dst, const struct scan_field *src)
+{
+	dst->num_bits	= src->num_bits;
+	dst->out_value	= buf_cpy(src->out_value, cmd_queue_alloc(DIV_ROUND_UP(src->num_bits, 8)), src->num_bits);
+	dst->in_value	= src->in_value;
+}
+
 enum scan_type jtag_scan_type(const struct scan_command *cmd)
 {
 	int i;
@@ -181,33 +193,33 @@ int jtag_build_buffer(const struct scan_command *cmd, uint8_t **buffer)
 
 	bit_count = 0;
 
-	DEBUG_JTAG_IO("%s num_fields: %i",
+	LOG_DEBUG_IO("%s num_fields: %i",
 			cmd->ir_scan ? "IRSCAN" : "DRSCAN",
 			cmd->num_fields);
 
 	for (i = 0; i < cmd->num_fields; i++) {
 		if (cmd->fields[i].out_value) {
-#ifdef _DEBUG_JTAG_IO_
-			char *char_buf = buf_to_str(cmd->fields[i].out_value,
-				(cmd->fields[i].num_bits > DEBUG_JTAG_IOZ)
-					? DEBUG_JTAG_IOZ
-					: cmd->fields[i].num_bits, 16);
+			if (LOG_LEVEL_IS(LOG_LVL_DEBUG_IO)) {
+				char *char_buf = buf_to_str(cmd->fields[i].out_value,
+						(cmd->fields[i].num_bits > DEBUG_JTAG_IOZ)
+						? DEBUG_JTAG_IOZ
+								: cmd->fields[i].num_bits, 16);
 
-			LOG_DEBUG("fields[%i].out_value[%i]: 0x%s", i,
-					cmd->fields[i].num_bits, char_buf);
-			free(char_buf);
-#endif
+				LOG_DEBUG("fields[%i].out_value[%i]: 0x%s", i,
+						cmd->fields[i].num_bits, char_buf);
+				free(char_buf);
+			}
 			buf_set_buf(cmd->fields[i].out_value, 0, *buffer,
 					bit_count, cmd->fields[i].num_bits);
 		} else {
-			DEBUG_JTAG_IO("fields[%i].out_value[%i]: NULL",
+			LOG_DEBUG_IO("fields[%i].out_value[%i]: NULL",
 					i, cmd->fields[i].num_bits);
 		}
 
 		bit_count += cmd->fields[i].num_bits;
 	}
 
-	/*DEBUG_JTAG_IO("bit_count totalling: %i",  bit_count); */
+	/*LOG_DEBUG_IO("bit_count totalling: %i",  bit_count); */
 
 	return bit_count;
 }
@@ -230,16 +242,16 @@ int jtag_read_buffer(uint8_t *buffer, const struct scan_command *cmd)
 			uint8_t *captured = buf_set_buf(buffer, bit_count,
 					malloc(DIV_ROUND_UP(num_bits, 8)), 0, num_bits);
 
-#ifdef _DEBUG_JTAG_IO_
-			char *char_buf = buf_to_str(captured,
-					(num_bits > DEBUG_JTAG_IOZ)
+			if (LOG_LEVEL_IS(LOG_LVL_DEBUG_IO)) {
+				char *char_buf = buf_to_str(captured,
+						(num_bits > DEBUG_JTAG_IOZ)
 						? DEBUG_JTAG_IOZ
-						: num_bits, 16);
+								: num_bits, 16);
 
-			LOG_DEBUG("fields[%i].in_value[%i]: 0x%s",
-					i, num_bits, char_buf);
-			free(char_buf);
-#endif
+				LOG_DEBUG("fields[%i].in_value[%i]: 0x%s",
+						i, num_bits, char_buf);
+				free(char_buf);
+			}
 
 			if (cmd->fields[i].in_value)
 				buf_cpy(captured, cmd->fields[i].in_value, num_bits);

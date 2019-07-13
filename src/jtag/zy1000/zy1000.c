@@ -265,8 +265,8 @@ COMMAND_HANDLER(handle_power_command)
 			bool enable;
 			COMMAND_PARSE_ON_OFF(CMD_ARGV[0], enable);
 			setPower(enable);
-			/* fall through */
 		}
+			/* fall through */
 		case 0:
 			LOG_INFO("Target power %s", savePower ? "on" : "off");
 			break;
@@ -1242,6 +1242,7 @@ struct jtag_interface zy1000_interface = {
 	.supported = DEBUG_CAP_TMS_SEQ,
 	.execute_queue = NULL,
 	.speed = zy1000_speed,
+	.transports = jtag_only,
 	.commands = zy1000_commands,
 	.init = zy1000_init,
 	.quit = zy1000_quit,

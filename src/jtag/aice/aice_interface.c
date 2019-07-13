@@ -150,7 +150,7 @@ static int aice_execute_reset(struct jtag_command *cmd)
 	static int last_trst;
 	int retval = ERROR_OK;
 
-	DEBUG_JTAG_IO("reset trst: %d", cmd->cmd.reset->trst);
+	LOG_DEBUG_IO("reset trst: %d", cmd->cmd.reset->trst);
 
 	if (cmd->cmd.reset->trst != last_trst) {
 		if (cmd->cmd.reset->trst)
@@ -239,16 +239,40 @@ static int aice_khz(int khz, int *jtag_speed)
 	return ERROR_OK;
 }
 
+int aice_scan_jtag_chain(void)
+{
+	LOG_DEBUG("=== %s ===", __func__);
+	uint8_t num_of_idcode = 0;
+	struct target *target;
+
+	int res = aice_port->api->idcode(aice_target_id_codes, &num_of_idcode);
+	if (res != ERROR_OK) {
+		LOG_ERROR("<-- TARGET ERROR! Failed to identify AndesCore "
+					"JTAG Manufacture ID in the JTAG scan chain. "
+					"Failed to access EDM registers. -->");
+		return res;
+	}
+
+	for (uint32_t i = 0; i < num_of_idcode; i++)
+		LOG_DEBUG("id_codes[%d] = 0x%x", i, aice_target_id_codes[i]);
+
+	/* Update tap idcode */
+	for (target = all_targets; target; target = target->next)
+		target->tap->idcode = aice_target_id_codes[target->tap->abs_chain_position];
+
+	return ERROR_OK;
+}
+
 /***************************************************************************/
 /* Command handlers */
 COMMAND_HANDLER(aice_handle_aice_info_command)
 {
 	LOG_DEBUG("aice_handle_aice_info_command");
 
-	command_print(CMD_CTX, "Description: %s", param.device_desc);
-	command_print(CMD_CTX, "Serial number: %s", param.serial);
+	command_print(CMD, "Description: %s", param.device_desc);
+	command_print(CMD, "Serial number: %s", param.serial);
 	if (strncmp(aice_port->name, "aice_pipe", 9) == 0)
-		command_print(CMD_CTX, "Adapter: %s", param.adapter_name);
+		command_print(CMD, "Adapter: %s", param.adapter_name);
 
 	return ERROR_OK;
 }

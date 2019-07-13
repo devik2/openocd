@@ -36,6 +36,7 @@
 struct reg;
 struct trace;
 struct command_context;
+struct command_invocation;
 struct breakpoint;
 struct watchpoint;
 struct mem_param;
@@ -84,7 +85,8 @@ enum target_debug_reason {
 	DBG_REASON_SINGLESTEP = 4,
 	DBG_REASON_NOTHALTED = 5,
 	DBG_REASON_EXIT = 6,
-	DBG_REASON_UNDEFINED = 7,
+	DBG_REASON_EXC_CATCH = 7,
+	DBG_REASON_UNDEFINED = 8,
 };
 
 enum target_endianness {
@@ -153,7 +155,7 @@ struct target {
 	struct target_event_action *event_action;
 
 	int reset_halt;						/* attempt resetting the CPU into the halted mode? */
-	uint32_t working_area;				/* working area (initialised RAM). Evaluated
+	target_addr_t working_area;				/* working area (initialised RAM). Evaluated
 										 * upon first allocation from virtual/physical address. */
 	bool working_area_virt_spec;		/* virtual address specified? */
 	target_addr_t working_area_virt;			/* virtual address */
@@ -176,20 +178,21 @@ struct target {
 	void *private_config;				/* pointer to target specific config data (for jim_configure hook) */
 	struct target *next;				/* next target in list */
 
-	int display;						/* display async info in telnet session. Do not display
+	bool verbose_halt_msg;				/* display async info in telnet session. Do not display
 										 * lots of halted/resumed info when stepping in debugger. */
 	bool halt_issued;					/* did we transition to halted state? */
 	int64_t halt_issued_time;			/* Note time when halt was issued */
 
+										/* ARM v7/v8 targets with ADIv5 interface */
 	bool dbgbase_set;					/* By default the debug base is not set */
 	uint32_t dbgbase;					/* Really a Cortex-A specific option, but there is no
 										 * system in place to support target specific options
 										 * currently. */
+	bool has_dap;						/* set to true if target has ADIv5 support */
+	bool dap_configured;				/* set to true if ADIv5 DAP is configured */
+	bool tap_configured;				/* set to true if JTAG tap has been configured
+										 * through -chain-position */
 
-	 bool ctibase_set;					 /* By default the debug base is not set */
-	 uint32_t ctibase;					 /* Really a Cortex-A specific option, but there is no
-										  * system in place to support target specific options
-										  * currently. */
 	struct rtos *rtos;					/* Instance of Real Time Operating System support */
 	bool rtos_auto_detect;				/* A flag that indicates that the RTOS has been specified as "auto"
 										 * and must be detected when symbols are offered */
@@ -204,6 +207,11 @@ struct target {
 
 	/* file-I/O information for host to do syscall */
 	struct gdb_fileio_info *fileio_info;
+
+	char *gdb_port_override;			/* target-specific override for gdb_port */
+
+	/* The semihosting information, extracted from the target. */
+	struct semihosting *semihosting;
 };
 
 struct target_list {
@@ -213,11 +221,18 @@ struct target_list {
 
 struct gdb_fileio_info {
 	char *identifier;
-	uint32_t param_1;
-	uint32_t param_2;
-	uint32_t param_3;
-	uint32_t param_4;
+	uint64_t param_1;
+	uint64_t param_2;
+	uint64_t param_3;
+	uint64_t param_4;
 };
+
+/** Returns a description of the endianness for the specified target. */
+static inline const char *target_endianness(struct target *target)
+{
+	return (target->endianness == TARGET_ENDIAN_UNKNOWN) ? "unknown" :
+			(target->endianness == TARGET_BIG_ENDIAN) ? "big endian" : "little endian";
+}
 
 /** Returns the instance-specific name of the specified target. */
 static inline const char *target_name(struct target *target)
@@ -277,7 +292,6 @@ struct target_event_action {
 	enum target_event event;
 	struct Jim_Interp *interp;
 	struct Jim_Obj *body;
-	int has_percent;
 	struct target_event_action *next;
 };
 
@@ -301,14 +315,25 @@ struct target_trace_callback {
 	int (*callback)(struct target *target, size_t len, uint8_t *data, void *priv);
 };
 
+enum target_timer_type {
+	TARGET_TIMER_TYPE_ONESHOT,
+	TARGET_TIMER_TYPE_PERIODIC
+};
+
 struct target_timer_callback {
 	int (*callback)(void *priv);
-	int time_ms;
-	int periodic;
+	unsigned int time_ms;
+	enum target_timer_type type;
 	bool removed;
 	struct timeval when;
 	void *priv;
 	struct target_timer_callback *next;
+};
+
+struct target_memory_check_block {
+	target_addr_t address;
+	uint32_t size;
+	uint32_t result;
 };
 
 int target_register_commands(struct command_context *cmd_ctx);
@@ -366,7 +391,7 @@ int target_call_trace_callbacks(struct target *target, size_t len, uint8_t *data
  * or much more rarely than specified
  */
 int target_register_timer_callback(int (*callback)(void *priv),
-		int time_ms, int periodic, void *priv);
+		unsigned int time_ms, enum target_timer_type type, void *priv);
 int target_unregister_timer_callback(int (*callback)(void *priv), void *priv);
 int target_call_timer_callbacks(void);
 /**
@@ -377,6 +402,7 @@ int target_call_timer_callbacks_now(void);
 
 struct target *get_target_by_num(int num);
 struct target *get_current_target(struct command_context *cmd_ctx);
+struct target *get_current_target_or_null(struct command_context *cmd_ctx);
 struct target *get_target(const char *id);
 
 /**
@@ -461,6 +487,13 @@ int target_hit_watchpoint(struct target *target,
 		struct watchpoint **watchpoint);
 
 /**
+ * Obtain the architecture for GDB.
+ *
+ * This routine is a wrapper for target->type->get_gdb_arch.
+ */
+const char *target_get_gdb_arch(struct target *target);
+
+/**
  * Obtain the registers for GDB.
  *
  * This routine is a wrapper for target->type->get_gdb_reg_list.
@@ -468,6 +501,13 @@ int target_hit_watchpoint(struct target *target,
 int target_get_gdb_reg_list(struct target *target,
 		struct reg **reg_list[], int *reg_list_size,
 		enum target_register_class reg_class);
+
+/**
+ * Check if @a target allows GDB connections.
+ *
+ * Some target do not implement the necessary code required by GDB.
+ */
+bool target_supports_gdb_connection(struct target *target);
 
 /**
  * Step the target.
@@ -584,7 +624,8 @@ int target_read_buffer(struct target *target,
 int target_checksum_memory(struct target *target,
 		target_addr_t address, uint32_t size, uint32_t *crc);
 int target_blank_check_memory(struct target *target,
-		target_addr_t address, uint32_t size, uint32_t *blank, uint8_t erased_value);
+		struct target_memory_check_block *blocks, int num_blocks,
+		uint8_t erased_value);
 int target_wait_state(struct target *target, enum target_state state, int ms);
 
 /**
@@ -601,7 +642,17 @@ int target_get_gdb_fileio_info(struct target *target, struct gdb_fileio_info *fi
  */
 int target_gdb_fileio_end(struct target *target, int retcode, int fileio_errno, bool ctrl_c);
 
+/**
+ * Return the highest accessible address for this target.
+ */
+target_addr_t target_address_max(struct target *target);
 
+/**
+ * Return the number of address bits this target supports.
+ *
+ * This routine is a wrapper for target->type->address_bits.
+ */
+unsigned target_address_bits(struct target *target);
 
 /** Return the *name* of this targets current state */
 const char *target_state_name(struct target *target);
@@ -679,6 +730,10 @@ int target_arch_state(struct target *target);
 
 void target_handle_event(struct target *t, enum target_event e);
 
+void target_handle_md_output(struct command_invocation *cmd,
+	struct target *target, target_addr_t address, unsigned size,
+	unsigned count, const uint8_t *buffer);
+
 #define ERROR_TARGET_INVALID	(-300)
 #define ERROR_TARGET_INIT_FAILED (-301)
 #define ERROR_TARGET_TIMEOUT	(-302)
@@ -690,6 +745,7 @@ void target_handle_event(struct target *t, enum target_event e);
 #define ERROR_TARGET_TRANSLATION_FAULT	(-309)
 #define ERROR_TARGET_NOT_RUNNING (-310)
 #define ERROR_TARGET_NOT_EXAMINED (-311)
+#define ERROR_TARGET_DUPLICATE_BREAKPOINT (-312)
 
 extern bool get_target_reset_nag(void);
 

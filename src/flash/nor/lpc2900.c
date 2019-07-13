@@ -501,7 +501,7 @@ COMMAND_HANDLER(lpc2900_handle_signature_command)
 	if (status != ERROR_OK)
 		return status;
 
-	command_print(CMD_CTX, "signature: 0x%8.8" PRIx32
+	command_print(CMD, "signature: 0x%8.8" PRIx32
 		":0x%8.8" PRIx32
 		":0x%8.8" PRIx32
 		":0x%8.8" PRIx32,
@@ -595,11 +595,11 @@ COMMAND_HANDLER(lpc2900_handle_password_command)
 	lpc2900_info->risky = !strcmp(CMD_ARGV[1], ISS_PASSWORD);
 
 	if (!lpc2900_info->risky) {
-		command_print(CMD_CTX, "Wrong password (use '%s')", ISS_PASSWORD);
+		command_print(CMD, "Wrong password (use '%s')", ISS_PASSWORD);
 		return ERROR_COMMAND_ARGUMENT_INVALID;
 	}
 
-	command_print(CMD_CTX,
+	command_print(CMD,
 		"Potentially dangerous operation allowed in next command!");
 
 	return ERROR_OK;
@@ -622,7 +622,7 @@ COMMAND_HANDLER(lpc2900_handle_write_custom_command)
 
 	/* Check if command execution is allowed. */
 	if (!lpc2900_info->risky) {
-		command_print(CMD_CTX, "Command execution not allowed!");
+		command_print(CMD, "Command execution not allowed!");
 		return ERROR_COMMAND_ARGUMENT_INVALID;
 	}
 	lpc2900_info->risky = 0;
@@ -721,7 +721,7 @@ COMMAND_HANDLER(lpc2900_handle_secure_sector_command)
 
 	/* Check if command execution is allowed. */
 	if (!lpc2900_info->risky) {
-		command_print(CMD_CTX, "Command execution not allowed! "
+		command_print(CMD, "Command execution not allowed! "
 			"(use 'password' command first)");
 		return ERROR_COMMAND_ARGUMENT_INVALID;
 	}
@@ -734,7 +734,7 @@ COMMAND_HANDLER(lpc2900_handle_secure_sector_command)
 	if ((first >= bank->num_sectors) ||
 			(last >= bank->num_sectors) ||
 			(first > last)) {
-		command_print(CMD_CTX, "Illegal sector range");
+		command_print(CMD, "Illegal sector range");
 		return ERROR_COMMAND_ARGUMENT_INVALID;
 	}
 
@@ -773,7 +773,7 @@ COMMAND_HANDLER(lpc2900_handle_secure_sector_command)
 		}
 	}
 
-	command_print(CMD_CTX,
+	command_print(CMD,
 		"Sectors security will become effective after next power cycle");
 
 	/* Update the sector security status */
@@ -803,7 +803,7 @@ COMMAND_HANDLER(lpc2900_handle_secure_jtag_command)
 
 	/* Check if command execution is allowed. */
 	if (!lpc2900_info->risky) {
-		command_print(CMD_CTX, "Command execution not allowed! "
+		command_print(CMD, "Command execution not allowed! "
 			"(use 'password' command first)");
 		return ERROR_COMMAND_ARGUMENT_INVALID;
 	}
@@ -1035,18 +1035,13 @@ static int lpc2900_erase(struct flash_bank *bank, int first, int last)
 	return ERROR_OK;
 }
 
-static int lpc2900_protect(struct flash_bank *bank, int set, int first, int last)
-{
-	/* This command is not supported.
-	* "Protection" in LPC2900 terms is handled transparently. Sectors will
-	* automatically be unprotected as needed.
-	* Instead we use the concept of sector security. A secured sector is shown
-	* as "protected" in OpenOCD. Sector security is a permanent feature, and
-	* cannot be disabled once activated.
-	*/
-
-	return ERROR_OK;
-}
+/* lpc2900_protect command is not supported.
+* "Protection" in LPC2900 terms is handled transparently. Sectors will
+* automatically be unprotected as needed.
+* Instead we use the concept of sector security. A secured sector is shown
+* as "protected" in OpenOCD. Sector security is a permanent feature, and
+* cannot be disabled once activated.
+*/
 
 /**
  * Write data to flash.
@@ -1586,16 +1581,16 @@ static int lpc2900_protect_check(struct flash_bank *bank)
 	return lpc2900_read_security_status(bank);
 }
 
-struct flash_driver lpc2900_flash = {
+const struct flash_driver lpc2900_flash = {
 	.name = "lpc2900",
 	.commands = lpc2900_command_handlers,
 	.flash_bank_command = lpc2900_flash_bank_command,
 	.erase = lpc2900_erase,
-	.protect = lpc2900_protect,
 	.write = lpc2900_write,
 	.read = default_flash_read,
 	.probe = lpc2900_probe,
 	.auto_probe = lpc2900_probe,
 	.erase_check = lpc2900_erase_check,
 	.protect_check = lpc2900_protect_check,
+	.free_driver_priv = default_flash_free_driver_priv,
 };
