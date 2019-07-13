@@ -58,11 +58,11 @@
 /*
  * Helper func to determine if gpio number valid
  *
- * Assume here that there will be less than 1000 gpios on a system
+ * Assume here that there will be less than 10000 gpios on a system
  */
 static int is_gpio_valid(int gpio)
 {
-	return gpio >= 0 && gpio < 1000;
+	return gpio >= 0 && gpio < 10000;
 }
 
 /*
@@ -89,7 +89,7 @@ static int open_write_close(const char *name, const char *valstr)
  */
 static void unexport_sysfs_gpio(int gpio)
 {
-	char gpiostr[4];
+	char gpiostr[5];
 
 	if (!is_gpio_valid(gpio))
 		return;
@@ -113,7 +113,7 @@ static void unexport_sysfs_gpio(int gpio)
 static int setup_sysfs_gpio(int gpio, int is_output, int init_high)
 {
 	char buf[40];
-	char gpiostr[4];
+	char gpiostr[5];
 	int ret;
 
 	if (!is_gpio_valid(gpio))
@@ -356,7 +356,7 @@ COMMAND_HANDLER(sysfsgpio_handle_jtag_gpionums)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
-	command_print(CMD_CTX,
+	command_print(CMD,
 			"SysfsGPIO nums: tck = %d, tms = %d, tdi = %d, tdo = %d",
 			tck_gpio, tms_gpio, tdi_gpio, tdo_gpio);
 
@@ -368,7 +368,7 @@ COMMAND_HANDLER(sysfsgpio_handle_jtag_gpionum_tck)
 	if (CMD_ARGC == 1)
 		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], tck_gpio);
 
-	command_print(CMD_CTX, "SysfsGPIO num: tck = %d", tck_gpio);
+	command_print(CMD, "SysfsGPIO num: tck = %d", tck_gpio);
 	return ERROR_OK;
 }
 
@@ -377,7 +377,7 @@ COMMAND_HANDLER(sysfsgpio_handle_jtag_gpionum_tms)
 	if (CMD_ARGC == 1)
 		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], tms_gpio);
 
-	command_print(CMD_CTX, "SysfsGPIO num: tms = %d", tms_gpio);
+	command_print(CMD, "SysfsGPIO num: tms = %d", tms_gpio);
 	return ERROR_OK;
 }
 
@@ -386,7 +386,7 @@ COMMAND_HANDLER(sysfsgpio_handle_jtag_gpionum_tdo)
 	if (CMD_ARGC == 1)
 		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], tdo_gpio);
 
-	command_print(CMD_CTX, "SysfsGPIO num: tdo = %d", tdo_gpio);
+	command_print(CMD, "SysfsGPIO num: tdo = %d", tdo_gpio);
 	return ERROR_OK;
 }
 
@@ -395,7 +395,7 @@ COMMAND_HANDLER(sysfsgpio_handle_jtag_gpionum_tdi)
 	if (CMD_ARGC == 1)
 		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], tdi_gpio);
 
-	command_print(CMD_CTX, "SysfsGPIO num: tdi = %d", tdi_gpio);
+	command_print(CMD, "SysfsGPIO num: tdi = %d", tdi_gpio);
 	return ERROR_OK;
 }
 
@@ -404,7 +404,7 @@ COMMAND_HANDLER(sysfsgpio_handle_jtag_gpionum_srst)
 	if (CMD_ARGC == 1)
 		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], srst_gpio);
 
-	command_print(CMD_CTX, "SysfsGPIO num: srst = %d", srst_gpio);
+	command_print(CMD, "SysfsGPIO num: srst = %d", srst_gpio);
 	return ERROR_OK;
 }
 
@@ -413,7 +413,7 @@ COMMAND_HANDLER(sysfsgpio_handle_jtag_gpionum_trst)
 	if (CMD_ARGC == 1)
 		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], trst_gpio);
 
-	command_print(CMD_CTX, "SysfsGPIO num: trst = %d", trst_gpio);
+	command_print(CMD, "SysfsGPIO num: trst = %d", trst_gpio);
 	return ERROR_OK;
 }
 
@@ -426,7 +426,7 @@ COMMAND_HANDLER(sysfsgpio_handle_swd_gpionums)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
-	command_print(CMD_CTX,
+	command_print(CMD,
 			"SysfsGPIO nums: swclk = %d, swdio = %d",
 			swclk_gpio, swdio_gpio);
 
@@ -438,7 +438,7 @@ COMMAND_HANDLER(sysfsgpio_handle_swd_gpionum_swclk)
 	if (CMD_ARGC == 1)
 		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], swclk_gpio);
 
-	command_print(CMD_CTX, "SysfsGPIO num: swclk = %d", swclk_gpio);
+	command_print(CMD, "SysfsGPIO num: swclk = %d", swclk_gpio);
 	return ERROR_OK;
 }
 
@@ -447,7 +447,7 @@ COMMAND_HANDLER(sysfsgpio_handle_swd_gpionum_swdio)
 	if (CMD_ARGC == 1)
 		COMMAND_PARSE_NUMBER(int, CMD_ARGV[0], swdio_gpio);
 
-	command_print(CMD_CTX, "SysfsGPIO num: swdio = %d", swdio_gpio);
+	command_print(CMD, "SysfsGPIO num: swdio = %d", swdio_gpio);
 	return ERROR_OK;
 }
 
@@ -457,62 +457,70 @@ static const struct command_registration sysfsgpio_command_handlers[] = {
 		.handler = &sysfsgpio_handle_jtag_gpionums,
 		.mode = COMMAND_CONFIG,
 		.help = "gpio numbers for tck, tms, tdi, tdo. (in that order)",
-		.usage = "(tck tms tdi tdo)* ",
+		.usage = "[tck tms tdi tdo]",
 	},
 	{
 		.name = "sysfsgpio_tck_num",
 		.handler = &sysfsgpio_handle_jtag_gpionum_tck,
 		.mode = COMMAND_CONFIG,
 		.help = "gpio number for tck.",
+		.usage = "[tck]",
 	},
 	{
 		.name = "sysfsgpio_tms_num",
 		.handler = &sysfsgpio_handle_jtag_gpionum_tms,
 		.mode = COMMAND_CONFIG,
 		.help = "gpio number for tms.",
+		.usage = "[tms]",
 	},
 	{
 		.name = "sysfsgpio_tdo_num",
 		.handler = &sysfsgpio_handle_jtag_gpionum_tdo,
 		.mode = COMMAND_CONFIG,
 		.help = "gpio number for tdo.",
+		.usage = "[tdo]",
 	},
 	{
 		.name = "sysfsgpio_tdi_num",
 		.handler = &sysfsgpio_handle_jtag_gpionum_tdi,
 		.mode = COMMAND_CONFIG,
 		.help = "gpio number for tdi.",
+		.usage = "[tdi]",
 	},
 	{
 		.name = "sysfsgpio_srst_num",
 		.handler = &sysfsgpio_handle_jtag_gpionum_srst,
 		.mode = COMMAND_CONFIG,
 		.help = "gpio number for srst.",
+		.usage = "[srst]",
 	},
 	{
 		.name = "sysfsgpio_trst_num",
 		.handler = &sysfsgpio_handle_jtag_gpionum_trst,
 		.mode = COMMAND_CONFIG,
 		.help = "gpio number for trst.",
+		.usage = "[trst]",
 	},
 	{
 		.name = "sysfsgpio_swd_nums",
 		.handler = &sysfsgpio_handle_swd_gpionums,
 		.mode = COMMAND_CONFIG,
 		.help = "gpio numbers for swclk, swdio. (in that order)",
-		.usage = "(swclk swdio)* ",
+		.usage = "[swclk swdio]",
 	},
 	{
 		.name = "sysfsgpio_swclk_num",
 		.handler = &sysfsgpio_handle_swd_gpionum_swclk,
 		.mode = COMMAND_CONFIG,
 		.help = "gpio number for swclk.",
+		.usage = "[swclk]",
 	},
 	{
 		.name = "sysfsgpio_swdio_num",
 		.handler = &sysfsgpio_handle_swd_gpionum_swdio,
 		.mode = COMMAND_CONFIG,
 		.help = "gpio number for swdio.",
+		.usage = "[swdio]",
 	},
 	COMMAND_REGISTRATION_DONE
 };
@@ -561,6 +569,8 @@ static void cleanup_all_fds(void)
 	cleanup_fd(tdo_fd, tdo_gpio);
 	cleanup_fd(trst_fd, trst_gpio);
 	cleanup_fd(srst_fd, srst_gpio);
+	cleanup_fd(swclk_fd, swclk_gpio);
+	cleanup_fd(swdio_fd, swdio_gpio);
 }
 
 static bool sysfsgpio_jtag_mode_possible(void)

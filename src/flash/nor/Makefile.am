@@ -17,12 +17,18 @@ NOR_DRIVERS = \
 	%D%/at91sam7.c \
 	%D%/ath79.c \
 	%D%/atsamv.c \
+	%D%/atsame5.c \
 	%D%/avrf.c \
+	%D%/bluenrg-x.c \
+	%D%/cc3220sf.c \
+	%D%/cc26xx.c \
 	%D%/cfi.c \
 	%D%/dsp5680xx_flash.c \
 	%D%/efm32.c \
 	%D%/em357.c \
+	%D%/esirisc_flash.c \
 	%D%/faux.c \
+	%D%/fespi.c \
 	%D%/fm3.c \
 	%D%/fm4.c \
 	%D%/ht32f5xxx.c \
@@ -33,7 +39,9 @@ NOR_DRIVERS = \
 	%D%/lpc288x.c \
 	%D%/lpc2900.c \
 	%D%/lpcspifi.c \
+	%D%/max32xxx.c \
 	%D%/mdr.c \
+	%D%/msp432.c \
 	%D%/mrvlqspi.c \
 	%D%/niietcm4.c \
 	%D%/non_cfi.c \
@@ -42,6 +50,8 @@ NOR_DRIVERS = \
 	%D%/ocl.c \
 	%D%/pic32mx.c \
 	%D%/psoc4.c \
+	%D%/psoc5lp.c \
+	%D%/psoc6.c \
 	%D%/sim3x.c \
 	%D%/spi.c \
 	%D%/stmsmi.c \
@@ -56,15 +66,19 @@ NOR_DRIVERS = \
 	%D%/str9xpec.c \
 	%D%/tms470.c \
 	%D%/virtual.c \
+	%D%/w600.c \
 	%D%/xcf.c \
 	%D%/xmc1xxx.c \
 	%D%/xmc4xxx.c
 
 NORHEADERS = \
 	%D%/core.h \
+	%D%/cc3220sf.h \
+	%D%/cc26xx.h \
 	%D%/cfi.h \
 	%D%/driver.h \
 	%D%/imp.h \
 	%D%/non_cfi.h \
 	%D%/ocl.h \
-	%D%/spi.h
+	%D%/spi.h \
+	%D%/msp432.h

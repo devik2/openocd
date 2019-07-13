@@ -44,6 +44,8 @@ struct reg *register_get_by_name(struct reg_cache *first,
 
 	while (cache) {
 		for (i = 0; i < cache->num_regs; i++) {
+			if (cache->reg_list[i].exist == false)
+				continue;
 			if (strcmp(cache->reg_list[i].name, name) == 0)
 				return &(cache->reg_list[i]);
 		}
@@ -84,8 +86,10 @@ void register_cache_invalidate(struct reg_cache *cache)
 	struct reg *reg = cache->reg_list;
 
 	for (unsigned n = cache->num_regs; n != 0; n--, reg++) {
-		reg->valid = 0;
-		reg->dirty = 0;
+		if (reg->exist == false)
+			continue;
+		reg->valid = false;
+		reg->dirty = false;
 	}
 }
 
@@ -96,8 +100,8 @@ static int register_get_dummy_core_reg(struct reg *reg)
 
 static int register_set_dummy_core_reg(struct reg *reg, uint8_t *buf)
 {
-	reg->dirty = 1;
-	reg->valid = 1;
+	reg->dirty = true;
+	reg->valid = true;
 
 	return ERROR_OK;
 }

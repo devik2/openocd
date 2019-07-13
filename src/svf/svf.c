@@ -382,7 +382,7 @@ COMMAND_HANDLER(handle_svf_command)
 		if (strcmp(CMD_ARGV[i], "-tap") == 0) {
 			tap = jtag_tap_by_string(CMD_ARGV[i+1]);
 			if (!tap) {
-				command_print(CMD_CTX, "Tap: %s unknown", CMD_ARGV[i+1]);
+				command_print(CMD, "Tap: %s unknown", CMD_ARGV[i+1]);
 				return ERROR_FAIL;
 			}
 			i++;
@@ -401,7 +401,7 @@ COMMAND_HANDLER(handle_svf_command)
 			svf_fd = fopen(CMD_ARGV[i], "r");
 			if (svf_fd == NULL) {
 				int err = errno;
-				command_print(CMD_CTX, "open(\"%s\"): %s", CMD_ARGV[i], strerror(err));
+				command_print(CMD, "open(\"%s\"): %s", CMD_ARGV[i], strerror(err));
 				/* no need to free anything now */
 				return ERROR_COMMAND_SYNTAX_ERROR;
 			} else
@@ -534,7 +534,7 @@ COMMAND_HANDLER(handle_svf_command)
 	time_measure_m = time_measure_s / 60;
 	time_measure_s %= 60;
 	if (time_measure_ms < 1000)
-		command_print(CMD_CTX,
+		command_print(CMD,
 			"\r\nTime used: %dm%ds%" PRId64 "ms ",
 			time_measure_m,
 			time_measure_s,
@@ -579,13 +579,13 @@ free_all:
 	svf_free_xxd_para(&svf_para.sir_para);
 
 	if (ERROR_OK == ret)
-		command_print(CMD_CTX,
+		command_print(CMD,
 			      "svf file programmed %s for %d commands with %d errors",
 			      (svf_ignore_error > 1) ? "unsuccessfully" : "successfully",
 			      command_num,
 			      (svf_ignore_error > 1) ? (svf_ignore_error - 1) : 0);
 	else
-		command_print(CMD_CTX, "svf file programmed failed");
+		command_print(CMD, "svf file programmed failed");
 
 	svf_ignore_error = 0;
 	return ret;
@@ -740,6 +740,9 @@ parse_char:
 		}
 		pos++;
 	}
+
+	if (num == 0)
+		return ERROR_FAIL;
 
 	*num_of_argu = num;
 
@@ -1313,7 +1316,7 @@ XXR_common:
 			 * SEC]] [ENDSTATE end_state] */
 			/* RUNTEST [run_state] min_time SEC [MAXIMUM max_time SEC] [ENDSTATE
 			 * end_state] */
-			if ((num_of_argu < 3) && (num_of_argu > 11)) {
+			if ((num_of_argu < 3) || (num_of_argu > 11)) {
 				LOG_ERROR("invalid parameter of %s", argus[0]);
 				return ERROR_FAIL;
 			}

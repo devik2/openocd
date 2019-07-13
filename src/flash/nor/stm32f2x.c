@@ -123,6 +123,19 @@
 /* Mass erase time can be as high as 32 s in x8 mode. */
 #define FLASH_MASS_ERASE_TIMEOUT 33000
 
+#define FLASH_BANK_BASE     0x80000000
+
+#define STM32F2_OTP_SIZE 512
+#define STM32F2_OTP_SECTOR_SIZE 32
+#define STM32F2_OTP_BANK_BASE       0x1fff7800
+#define STM32F2_OTP_LOCK_BASE       ((STM32F2_OTP_BANK_BASE) + (STM32F2_OTP_SIZE))
+
+/* see RM0410 section 3.6 "One-time programmable bytes" */
+#define STM32F7_OTP_SECTOR_SIZE 64
+#define STM32F7_OTP_SIZE 1024
+#define STM32F7_OTP_BANK_BASE       0x1ff0f000
+#define STM32F7_OTP_LOCK_BASE       ((STM32F7_OTP_BANK_BASE) + (STM32F7_OTP_SIZE))
+
 #define STM32_FLASH_BASE    0x40023c00
 #define STM32_FLASH_ACR     0x40023c00
 #define STM32_FLASH_KEYR    0x40023c04
@@ -185,7 +198,8 @@ struct stm32x_options {
 
 struct stm32x_flash_bank {
 	struct stm32x_options option_bytes;
-	int probed;
+	bool probed;
+	bool otp_unlocked;
 	bool has_large_mem;		/* F42x/43x/469/479/7xx in dual bank mode */
 	bool has_extra_options; /* F42x/43x/469/479/7xx */
 	bool has_boot_addr;     /* F7xx */
@@ -193,6 +207,49 @@ struct stm32x_flash_bank {
 	int protection_bits;	/* F413/423 */
 	uint32_t user_bank_size;
 };
+
+static bool stm32x_is_otp(struct flash_bank *bank)
+{
+	return bank->base == STM32F2_OTP_BANK_BASE ||
+		bank->base == STM32F7_OTP_BANK_BASE;
+}
+
+static bool stm32x_otp_is_f7(struct flash_bank *bank)
+{
+	return bank->base == STM32F7_OTP_BANK_BASE;
+}
+
+static int stm32x_is_otp_unlocked(struct flash_bank *bank)
+{
+	struct stm32x_flash_bank *stm32x_info = bank->driver_priv;
+
+	return stm32x_info->otp_unlocked;
+}
+
+static int stm32x_otp_disable(struct flash_bank *bank)
+{
+	struct stm32x_flash_bank *stm32x_info = bank->driver_priv;
+
+	LOG_INFO("OTP memory bank #%d is disabled for write commands.",
+		 bank->bank_number);
+	stm32x_info->otp_unlocked = false;
+	return ERROR_OK;
+}
+
+static int stm32x_otp_enable(struct flash_bank *bank)
+{
+	struct stm32x_flash_bank *stm32x_info = bank->driver_priv;
+
+	if (!stm32x_info->otp_unlocked) {
+		LOG_INFO("OTP memory bank #%d is is enabled for write commands.",
+			 bank->bank_number);
+		stm32x_info->otp_unlocked = true;
+	} else {
+		LOG_WARNING("OTP memory bank #%d is is already enabled for write commands.",
+			    bank->bank_number);
+	}
+	return ERROR_OK;
+}
 
 /* flash bank stm32x <base> <size> 0 0 <target#>
  */
@@ -206,7 +263,8 @@ FLASH_BANK_COMMAND_HANDLER(stm32x_flash_bank_command)
 	stm32x_info = malloc(sizeof(struct stm32x_flash_bank));
 	bank->driver_priv = stm32x_info;
 
-	stm32x_info->probed = 0;
+	stm32x_info->probed = false;
+	stm32x_info->otp_unlocked = false;
 	stm32x_info->user_bank_size = bank->size;
 
 	return ERROR_OK;
@@ -252,6 +310,8 @@ static int stm32x_wait_status_busy(struct flash_bank *bank, int timeout)
 
 	/* Clear but report errors */
 	if (status & FLASH_ERROR) {
+		if (retval == ERROR_OK)
+			retval = ERROR_FAIL;
 		/* If this operation fails, we ignore it and report the original
 		 * retval
 		 */
@@ -458,14 +518,67 @@ static int stm32x_write_options(struct flash_bank *bank)
 	return ERROR_OK;
 }
 
+static int stm32x_otp_read_protect(struct flash_bank *bank)
+{
+	struct target *target = bank->target;
+	uint32_t lock_base;
+	int i, retval;
+	uint8_t lock;
+
+	lock_base = stm32x_otp_is_f7(bank) ? STM32F7_OTP_LOCK_BASE
+		  : STM32F2_OTP_LOCK_BASE;
+
+	for (i = 0; i < bank->num_sectors; i++) {
+		retval = target_read_u8(target, lock_base + i, &lock);
+		if (retval != ERROR_OK)
+			return retval;
+		bank->sectors[i].is_protected = !lock;
+	}
+
+	return ERROR_OK;
+}
+
+static int stm32x_otp_protect(struct flash_bank *bank, int first, int last)
+{
+	struct target *target = bank->target;
+	uint32_t lock_base;
+	int i, retval;
+	uint8_t lock;
+
+	assert((0 <= first) && (first <= last) && (last < bank->num_sectors));
+
+	lock_base = stm32x_otp_is_f7(bank) ? STM32F7_OTP_LOCK_BASE
+		  : STM32F2_OTP_LOCK_BASE;
+
+	for (i = first; first <= last; i++) {
+		retval = target_read_u8(target, lock_base + i, &lock);
+		if (retval != ERROR_OK)
+			return retval;
+		if (lock)
+			continue;
+
+		lock = 0xff;
+		retval = target_write_u8(target, lock_base + i, lock);
+		if (retval != ERROR_OK)
+			return retval;
+	}
+
+	return ERROR_OK;
+}
+
 static int stm32x_protect_check(struct flash_bank *bank)
 {
 	struct stm32x_flash_bank *stm32x_info = bank->driver_priv;
 	struct flash_sector *prot_blocks;
 	int num_prot_blocks;
+	int retval;
+
+	/* if it's the OTP bank, look at the lock bits there */
+	if (stm32x_is_otp(bank))
+		return stm32x_otp_read_protect(bank);
 
 	/* read write protection settings */
-	int retval = stm32x_read_options(bank);
+	retval = stm32x_read_options(bank);
 	if (retval != ERROR_OK) {
 		LOG_DEBUG("unable to read option bytes");
 		return retval;
@@ -491,6 +604,11 @@ static int stm32x_erase(struct flash_bank *bank, int first, int last)
 	struct stm32x_flash_bank *stm32x_info = bank->driver_priv;
 	struct target *target = bank->target;
 	int i;
+
+	if (stm32x_is_otp(bank)) {
+		LOG_ERROR("Cannot erase OTP memory");
+		return ERROR_FAIL;
+	}
 
 	assert((0 <= first) && (first <= last) && (last < bank->num_sectors));
 
@@ -551,6 +669,13 @@ static int stm32x_protect(struct flash_bank *bank, int set, int first, int last)
 		return ERROR_TARGET_NOT_HALTED;
 	}
 
+	if (stm32x_is_otp(bank)) {
+		if (!set)
+			return ERROR_COMMAND_ARGUMENT_INVALID;
+
+		return stm32x_otp_protect(bank, first, last);
+	}
+
 	/* read protection settings */
 	int retval = stm32x_read_options(bank);
 	if (retval != ERROR_OK) {
@@ -584,46 +709,14 @@ static int stm32x_write_block(struct flash_bank *bank, const uint8_t *buffer,
 	struct armv7m_algorithm armv7m_info;
 	int retval = ERROR_OK;
 
-	/* see contrib/loaders/flash/stm32f2x.S for src */
-
 	static const uint8_t stm32x_flash_write_code[] = {
-									/* wait_fifo: */
-		0xD0, 0xF8, 0x00, 0x80,		/* ldr		r8, [r0, #0] */
-		0xB8, 0xF1, 0x00, 0x0F,		/* cmp		r8, #0 */
-		0x1A, 0xD0,					/* beq		exit */
-		0x47, 0x68,					/* ldr		r7, [r0, #4] */
-		0x47, 0x45,					/* cmp		r7, r8 */
-		0xF7, 0xD0,					/* beq		wait_fifo */
-
-		0xDF, 0xF8, 0x34, 0x60,		/* ldr		r6, STM32_PROG16 */
-		0x26, 0x61,					/* str		r6, [r4, #STM32_FLASH_CR_OFFSET] */
-		0x37, 0xF8, 0x02, 0x6B,		/* ldrh		r6, [r7], #0x02 */
-		0x22, 0xF8, 0x02, 0x6B,		/* strh		r6, [r2], #0x02 */
-		0xBF, 0xF3, 0x4F, 0x8F,		/* dsb		sy */
-									/* busy: */
-		0xE6, 0x68,					/* ldr		r6, [r4, #STM32_FLASH_SR_OFFSET] */
-		0x16, 0xF4, 0x80, 0x3F,		/* tst		r6, #0x10000 */
-		0xFB, 0xD1,					/* bne		busy */
-		0x16, 0xF0, 0xF0, 0x0F,		/* tst		r6, #0xf0 */
-		0x07, 0xD1,					/* bne		error */
-
-		0x8F, 0x42,					/* cmp		r7, r1 */
-		0x28, 0xBF,					/* it		cs */
-		0x00, 0xF1, 0x08, 0x07,		/* addcs	r7, r0, #8 */
-		0x47, 0x60,					/* str		r7, [r0, #4] */
-		0x01, 0x3B,					/* subs		r3, r3, #1 */
-		0x13, 0xB1,					/* cbz		r3, exit */
-		0xDF, 0xE7,					/* b		wait_fifo */
-									/* error: */
-		0x00, 0x21,					/* movs		r1, #0 */
-		0x41, 0x60,					/* str		r1, [r0, #4] */
-									/* exit: */
-		0x30, 0x46,					/* mov		r0, r6 */
-		0x00, 0xBE,					/* bkpt		#0x00 */
-
-		/* <STM32_PROG16>: */
-		0x01, 0x01, 0x00, 0x00,		/* .word	0x00000101 */
+#include "../../../contrib/loaders/flash/stm32/stm32f2x.inc"
 	};
+
+	if (stm32x_is_otp(bank) && !stm32x_is_otp_unlocked(bank)) {
+		LOG_ERROR("OTP memory bank is disabled for write commands.");
+		return ERROR_FAIL;
+	}
 
 	if (target_alloc_working_area(target, sizeof(stm32x_flash_write_code),
 			&write_algorithm) != ERROR_OK) {
@@ -634,8 +727,10 @@ static int stm32x_write_block(struct flash_bank *bank, const uint8_t *buffer,
 	retval = target_write_buffer(target, write_algorithm->address,
 			sizeof(stm32x_flash_write_code),
 			stm32x_flash_write_code);
-	if (retval != ERROR_OK)
+	if (retval != ERROR_OK) {
+		target_free_working_area(target, write_algorithm);
 		return retval;
+	}
 
 	/* memory buffer */
 	while (target_alloc_working_area_try(target, buffer_size, &source) != ERROR_OK) {
@@ -807,7 +902,7 @@ static int setup_sector(struct flash_bank *bank, int start, int num, int size)
 		bank->sectors[i].offset = bank->size;
 		bank->sectors[i].size = size;
 		bank->size += bank->sectors[i].size;
-	    LOG_DEBUG("sector %d: %dkBytes", i, size >> 10);
+	    LOG_DEBUG("sector %d: %d kBytes", i, size >> 10);
 	}
 
 	return start + num;
@@ -861,15 +956,17 @@ static int stm32x_probe(struct flash_bank *bank)
 {
 	struct target *target = bank->target;
 	struct stm32x_flash_bank *stm32x_info = bank->driver_priv;
-	int i, num_prot_blocks;
+	int i, num_prot_blocks, num_sectors;
 	uint16_t flash_size_in_kb;
+	uint16_t otp_size_in_b;
+	uint16_t otp_sector_size;
 	uint32_t flash_size_reg = 0x1FFF7A22;
 	uint16_t max_sector_size_in_kb = 128;
 	uint16_t max_flash_size_in_kb;
 	uint32_t device_id;
 	uint32_t base_address = 0x08000000;
 
-	stm32x_info->probed = 0;
+	stm32x_info->probed = false;
 	stm32x_info->has_large_mem = false;
 	stm32x_info->has_boot_addr = false;
 	stm32x_info->has_extra_options = false;
@@ -887,6 +984,40 @@ static int stm32x_probe(struct flash_bank *bank)
 		free(bank->prot_blocks);
 		bank->num_prot_blocks = 0;
 		bank->prot_blocks = NULL;
+	}
+
+	/* if explicitely called out as OTP bank, short circuit probe */
+	if (stm32x_is_otp(bank)) {
+		if (stm32x_otp_is_f7(bank)) {
+			otp_size_in_b = STM32F7_OTP_SIZE;
+			otp_sector_size = STM32F7_OTP_SECTOR_SIZE;
+		} else {
+			otp_size_in_b = STM32F2_OTP_SIZE;
+			otp_sector_size = STM32F2_OTP_SECTOR_SIZE;
+		}
+
+		num_sectors = otp_size_in_b / otp_sector_size;
+		LOG_INFO("flash size = %d bytes", otp_size_in_b);
+
+		assert(num_sectors > 0);
+
+		bank->num_sectors = num_sectors;
+		bank->sectors = calloc(sizeof(struct flash_sector), num_sectors);
+
+		if (stm32x_otp_is_f7(bank))
+			bank->size = STM32F7_OTP_SIZE;
+		else
+			bank->size = STM32F2_OTP_SIZE;
+
+		for (i = 0; i < num_sectors; i++) {
+			bank->sectors[i].offset = i * otp_sector_size;
+			bank->sectors[i].size = otp_sector_size;
+			bank->sectors[i].is_erased = 1;
+			bank->sectors[i].is_protected = 0;
+		}
+
+		stm32x_info->probed = true;
+		return ERROR_OK;
 	}
 
 	/* read stm32 device id register */
@@ -978,7 +1109,7 @@ static int stm32x_probe(struct flash_bank *bank)
 		flash_size_in_kb = stm32x_info->user_bank_size / 1024;
 	}
 
-	LOG_INFO("flash size = %dkbytes", flash_size_in_kb);
+	LOG_INFO("flash size = %d kbytes", flash_size_in_kb);
 
 	/* did we assign flash size? */
 	assert(flash_size_in_kb != 0xffff);
@@ -1073,7 +1204,7 @@ static int stm32x_probe(struct flash_bank *bank)
 	bank->num_prot_blocks = num_prot_blocks;
 	assert((bank->size >> 10) == flash_size_in_kb);
 
-	stm32x_info->probed = 1;
+	stm32x_info->probed = true;
 	return ERROR_OK;
 }
 
@@ -1223,6 +1354,9 @@ static int get_stm32x_info(struct flash_bank *bank, char *buf, int buf_size)
 		case 0x1000:
 			rev_str = "A";
 			break;
+		case 0x1001:
+			rev_str = "Z";
+			break;
 		}
 		break;
 
@@ -1281,7 +1415,7 @@ COMMAND_HANDLER(stm32x_handle_lock_command)
 	}
 
 	if (stm32x_read_options(bank) != ERROR_OK) {
-		command_print(CMD_CTX, "%s failed to read options", bank->driver->name);
+		command_print(CMD, "%s failed to read options", bank->driver->name);
 		return ERROR_OK;
 	}
 
@@ -1289,11 +1423,11 @@ COMMAND_HANDLER(stm32x_handle_lock_command)
 	stm32x_info->option_bytes.RDP = 0;
 
 	if (stm32x_write_options(bank) != ERROR_OK) {
-		command_print(CMD_CTX, "%s failed to lock device", bank->driver->name);
+		command_print(CMD, "%s failed to lock device", bank->driver->name);
 		return ERROR_OK;
 	}
 
-	command_print(CMD_CTX, "%s locked", bank->driver->name);
+	command_print(CMD, "%s locked", bank->driver->name);
 
 	return ERROR_OK;
 }
@@ -1320,7 +1454,7 @@ COMMAND_HANDLER(stm32x_handle_unlock_command)
 	}
 
 	if (stm32x_read_options(bank) != ERROR_OK) {
-		command_print(CMD_CTX, "%s failed to read options", bank->driver->name);
+		command_print(CMD, "%s failed to read options", bank->driver->name);
 		return ERROR_OK;
 	}
 
@@ -1332,11 +1466,11 @@ COMMAND_HANDLER(stm32x_handle_unlock_command)
 	}
 
 	if (stm32x_write_options(bank) != ERROR_OK) {
-		command_print(CMD_CTX, "%s failed to unlock device", bank->driver->name);
+		command_print(CMD, "%s failed to unlock device", bank->driver->name);
 		return ERROR_OK;
 	}
 
-	command_print(CMD_CTX, "%s unlocked.\n"
+	command_print(CMD, "%s unlocked.\n"
 			"INFO: a reset or power cycle is required "
 			"for the new settings to take effect.", bank->driver->name);
 
@@ -1391,7 +1525,7 @@ COMMAND_HANDLER(stm32x_handle_mass_erase_command)
 	int i;
 
 	if (CMD_ARGC < 1) {
-		command_print(CMD_CTX, "stm32x mass_erase <bank>");
+		command_print(CMD, "stm32x mass_erase <bank>");
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
@@ -1406,9 +1540,9 @@ COMMAND_HANDLER(stm32x_handle_mass_erase_command)
 		for (i = 0; i < bank->num_sectors; i++)
 			bank->sectors[i].is_erased = 1;
 
-		command_print(CMD_CTX, "stm32x mass erase complete");
+		command_print(CMD, "stm32x mass erase complete");
 	} else {
-		command_print(CMD_CTX, "stm32x mass erase failed");
+		command_print(CMD, "stm32x mass erase failed");
 	}
 
 	return retval;
@@ -1421,7 +1555,7 @@ COMMAND_HANDLER(stm32f2x_handle_options_read_command)
 	struct stm32x_flash_bank *stm32x_info = NULL;
 
 	if (CMD_ARGC != 1) {
-		command_print(CMD_CTX, "stm32f2x options_read <bank>");
+		command_print(CMD, "stm32f2x options_read <bank>");
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
@@ -1438,20 +1572,20 @@ COMMAND_HANDLER(stm32f2x_handle_options_read_command)
 		if (stm32x_info->has_boot_addr) {
 			uint32_t boot_addr = stm32x_info->option_bytes.boot_addr;
 
-			command_print(CMD_CTX, "stm32f2x user_options 0x%03X,"
+			command_print(CMD, "stm32f2x user_options 0x%03X,"
 				" boot_add0 0x%04X, boot_add1 0x%04X",
 				stm32x_info->option_bytes.user_options,
 				boot_addr & 0xffff, (boot_addr & 0xffff0000) >> 16);
 			if (stm32x_info->has_optcr2_pcrop) {
-				command_print(CMD_CTX, "stm32f2x optcr2_pcrop 0x%08X",
+				command_print(CMD, "stm32f2x optcr2_pcrop 0x%08X",
 						stm32x_info->option_bytes.optcr2_pcrop);
 			}
 		} else {
-			command_print(CMD_CTX, "stm32f2x user_options 0x%03X",
+			command_print(CMD, "stm32f2x user_options 0x%03X",
 				stm32x_info->option_bytes.user_options);
 		}
 	} else {
-		command_print(CMD_CTX, "stm32f2x user_options 0x%02X",
+		command_print(CMD, "stm32f2x user_options 0x%02X",
 			stm32x_info->option_bytes.user_options);
 
 	}
@@ -1467,7 +1601,7 @@ COMMAND_HANDLER(stm32f2x_handle_options_write_command)
 	uint16_t user_options, boot_addr0, boot_addr1, options_mask;
 
 	if (CMD_ARGC < 1) {
-		command_print(CMD_CTX, "stm32f2x options_write <bank> ...");
+		command_print(CMD, "stm32f2x options_write <bank> ...");
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
@@ -1482,7 +1616,7 @@ COMMAND_HANDLER(stm32f2x_handle_options_write_command)
 	stm32x_info = bank->driver_priv;
 	if (stm32x_info->has_boot_addr) {
 		if (CMD_ARGC != 4) {
-			command_print(CMD_CTX, "stm32f2x options_write <bank> <user_options>"
+			command_print(CMD, "stm32f2x options_write <bank> <user_options>"
 				" <boot_addr0> <boot_addr1>");
 			return ERROR_COMMAND_SYNTAX_ERROR;
 		}
@@ -1491,7 +1625,7 @@ COMMAND_HANDLER(stm32f2x_handle_options_write_command)
 		stm32x_info->option_bytes.boot_addr = boot_addr0 | (((uint32_t) boot_addr1) << 16);
 	} else {
 		if (CMD_ARGC != 2) {
-			command_print(CMD_CTX, "stm32f2x options_write <bank> <user_options>");
+			command_print(CMD, "stm32f2x options_write <bank> <user_options>");
 			return ERROR_COMMAND_SYNTAX_ERROR;
 		}
 	}
@@ -1500,22 +1634,22 @@ COMMAND_HANDLER(stm32f2x_handle_options_write_command)
 	options_mask = !stm32x_info->has_extra_options ? ~0xfc :
 		~(((0xf00 << (stm32x_info->protection_bits - 12)) | 0xff) & 0xffc);
 	if (user_options & options_mask) {
-		command_print(CMD_CTX, "stm32f2x invalid user_options");
+		command_print(CMD, "stm32f2x invalid user_options");
 		return ERROR_COMMAND_ARGUMENT_INVALID;
 	}
 
 	stm32x_info->option_bytes.user_options = user_options;
 
 	if (stm32x_write_options(bank) != ERROR_OK) {
-		command_print(CMD_CTX, "stm32f2x failed to write options");
+		command_print(CMD, "stm32f2x failed to write options");
 		return ERROR_OK;
 	}
 
 	/* switching between single- and dual-bank modes requires re-probe */
 	/* ... and reprogramming of whole flash */
-	stm32x_info->probed = 0;
+	stm32x_info->probed = false;
 
-	command_print(CMD_CTX, "stm32f2x write options complete.\n"
+	command_print(CMD, "stm32f2x write options complete.\n"
 				"INFO: a reset or power cycle is required "
 				"for the new settings to take effect.");
 	return retval;
@@ -1529,7 +1663,7 @@ COMMAND_HANDLER(stm32f2x_handle_optcr2_write_command)
 	uint32_t optcr2_pcrop;
 
 	if (CMD_ARGC != 2) {
-		command_print(CMD_CTX, "stm32f2x optcr2_write <bank> <optcr2_value>");
+		command_print(CMD, "stm32f2x optcr2_write <bank> <optcr2_value>");
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
@@ -1539,11 +1673,11 @@ COMMAND_HANDLER(stm32f2x_handle_optcr2_write_command)
 
 	stm32x_info = bank->driver_priv;
 	if (!stm32x_info->has_optcr2_pcrop) {
-		command_print(CMD_CTX, "no optcr2 register");
+		command_print(CMD, "no optcr2 register");
 		return ERROR_COMMAND_ARGUMENT_INVALID;
 	}
 
-	command_print(CMD_CTX, "INFO: To disable PCROP, set PCROP_RDP"
+	command_print(CMD, "INFO: To disable PCROP, set PCROP_RDP"
 				" with PCROPi bits STILL SET, then\nlock device and"
 				" finally unlock it. Clears PCROP and mass erases flash.");
 
@@ -1555,11 +1689,42 @@ COMMAND_HANDLER(stm32f2x_handle_optcr2_write_command)
 	stm32x_info->option_bytes.optcr2_pcrop = optcr2_pcrop;
 
 	if (stm32x_write_options(bank) != ERROR_OK) {
-		command_print(CMD_CTX, "stm32f2x failed to write options");
+		command_print(CMD, "stm32f2x failed to write options");
 		return ERROR_OK;
 	}
 
-	command_print(CMD_CTX, "stm32f2x optcr2_write complete.");
+	command_print(CMD, "stm32f2x optcr2_write complete.");
+	return retval;
+}
+
+COMMAND_HANDLER(stm32x_handle_otp_command)
+{
+	if (CMD_ARGC < 2) {
+		command_print(CMD, "stm32x otp <bank> (enable|disable|show)");
+		return ERROR_COMMAND_SYNTAX_ERROR;
+	}
+
+	struct flash_bank *bank;
+	int retval = CALL_COMMAND_HANDLER(flash_command_get_bank, 0, &bank);
+	if (ERROR_OK != retval)
+		return retval;
+	if (stm32x_is_otp(bank)) {
+		if (strcmp(CMD_ARGV[1], "enable") == 0) {
+			stm32x_otp_enable(bank);
+		} else if (strcmp(CMD_ARGV[1], "disable") == 0) {
+			stm32x_otp_disable(bank);
+		} else if (strcmp(CMD_ARGV[1], "show") == 0) {
+			command_print(CMD,
+				"OTP memory bank #%d is %s for write commands.",
+				bank->bank_number,
+				stm32x_is_otp_unlocked(bank) ? "enabled" : "disabled");
+		} else {
+			return ERROR_COMMAND_SYNTAX_ERROR;
+		}
+	} else {
+		command_print(CMD, "Failed: not an OTP bank.");
+	}
+
 	return retval;
 }
 
@@ -1606,7 +1771,13 @@ static const struct command_registration stm32x_exec_command_handlers[] = {
 		.usage = "bank_id optcr2",
 		.help = "Write optcr2 word",
 	},
-
+	{
+		.name = "otp",
+		.handler = stm32x_handle_otp_command,
+		.mode = COMMAND_EXEC,
+		.usage = "bank_id",
+		.help = "OTP (One Time Programmable) memory write enable/disable.",
+	},
 	COMMAND_REGISTRATION_DONE
 };
 
@@ -1621,7 +1792,7 @@ static const struct command_registration stm32x_command_handlers[] = {
 	COMMAND_REGISTRATION_DONE
 };
 
-struct flash_driver stm32f2x_flash = {
+const struct flash_driver stm32f2x_flash = {
 	.name = "stm32f2x",
 	.commands = stm32x_command_handlers,
 	.flash_bank_command = stm32x_flash_bank_command,
@@ -1634,4 +1805,5 @@ struct flash_driver stm32f2x_flash = {
 	.erase_check = default_flash_blank_check,
 	.protect_check = stm32x_protect_check,
 	.info = get_stm32x_info,
+	.free_driver_priv = default_flash_free_driver_priv,
 };

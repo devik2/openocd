@@ -59,7 +59,7 @@
 /*
  * Relevant specifications from ARM include:
  *
- * ARM(tm) Debug Interface v5 Architecture Specification    ARM IHI 0031A
+ * ARM(tm) Debug Interface v5 Architecture Specification    ARM IHI 0031E
  * CoreSight(tm) v1.0 Architecture Specification            ARM IHI 0029B
  *
  * CoreSight(tm) DAP-Lite TRM, ARM DDI 0316D
@@ -73,9 +73,12 @@
 #include "jtag/interface.h"
 #include "arm.h"
 #include "arm_adi_v5.h"
+#include "jtag/swd.h"
+#include "transport/transport.h"
 #include <helper/jep106.h>
 #include <helper/time_support.h>
 #include <helper/list.h>
+#include <helper/jim-nvp.h>
 
 /* ARM ADI Specification requires at least 10 bits used for TAR autoincrement  */
 
@@ -96,14 +99,15 @@ static uint32_t max_tar_block_size(uint32_t tar_autoincr_block, uint32_t address
 
 static int mem_ap_setup_csw(struct adiv5_ap *ap, uint32_t csw)
 {
-	csw = csw | CSW_DBGSWENABLE | CSW_MASTER_DEBUG | CSW_HPROT |
-		ap->csw_default;
+	csw |= ap->csw_default;
 
 	if (csw != ap->csw_value) {
 		/* LOG_DEBUG("DAP: Set CSW %x",csw); */
 		int retval = dap_queue_ap_write(ap, MEM_AP_REG_CSW, csw);
-		if (retval != ERROR_OK)
+		if (retval != ERROR_OK) {
+			ap->csw_value = 0;
 			return retval;
+		}
 		ap->csw_value = csw;
 	}
 	return ERROR_OK;
@@ -114,8 +118,10 @@ static int mem_ap_setup_tar(struct adiv5_ap *ap, uint32_t tar)
 	if (!ap->tar_valid || tar != ap->tar_value) {
 		/* LOG_DEBUG("DAP: Set TAR %x",tar); */
 		int retval = dap_queue_ap_write(ap, MEM_AP_REG_TAR, tar);
-		if (retval != ERROR_OK)
+		if (retval != ERROR_OK) {
+			ap->tar_valid = false;
 			return retval;
+		}
 		ap->tar_value = tar;
 		ap->tar_valid = true;
 	}
@@ -152,6 +158,8 @@ static uint32_t mem_ap_get_tar_increment(struct adiv5_ap *ap)
 			return 2;
 		case CSW_32BIT:
 			return 4;
+		default:
+			return 0;
 		}
 	case CSW_ADDRINC_PACKED:
 		return 4;
@@ -614,32 +622,7 @@ int mem_ap_write_buf_noincr(struct adiv5_ap *ap,
 
 #define DAP_POWER_DOMAIN_TIMEOUT (10)
 
-/* FIXME don't import ... just initialize as
- * part of DAP transport setup
-*/
-extern const struct dap_ops jtag_dp_ops;
-
 /*--------------------------------------------------------------------------*/
-
-/**
- * Create a new DAP
- */
-struct adiv5_dap *dap_init(void)
-{
-	struct adiv5_dap *dap = calloc(1, sizeof(struct adiv5_dap));
-	int i;
-	/* Set up with safe defaults */
-	for (i = 0; i <= 255; i++) {
-		dap->ap[i].dap = dap;
-		dap->ap[i].ap_num = i;
-		/* memaccess_tck max is 255 */
-		dap->ap[i].memaccess_tck = 255;
-		/* Number of bits for tar autoincrement, impl. dep. at least 10 */
-		dap->ap[i].tar_autoincr_block = (1<<10);
-	}
-	INIT_LIST_HEAD(&dap->cmd_journal);
-	return dap;
-}
 
 /**
  * Invalidate cached DP select and cached TAR and CSW of all APs
@@ -667,16 +650,18 @@ int dap_dp_init(struct adiv5_dap *dap)
 {
 	int retval;
 
-	LOG_DEBUG(" ");
-	/* JTAG-DP or SWJ-DP, in JTAG mode
-	 * ... for SWD mode this is patched as part
-	 * of link switchover
-	 * FIXME: This should already be setup by the respective transport specific DAP creation.
-	 */
-	if (!dap->ops)
-		dap->ops = &jtag_dp_ops;
+	LOG_DEBUG("%s", adiv5_dap_name(dap));
 
 	dap_invalidate_cache(dap);
+
+	/*
+	 * Early initialize dap->dp_ctrl_stat.
+	 * In jtag mode only, if the following atomic reads fail and set the
+	 * sticky error, it will trigger the clearing of the sticky. Without this
+	 * initialization system and debug power would be disabled while clearing
+	 * the sticky error bit.
+	 */
+	dap->dp_ctrl_stat = CDBGPWRUPREQ | CSYSPWRUPREQ;
 
 	for (size_t i = 0; i < 30; i++) {
 		/* DP initialization */
@@ -686,7 +671,18 @@ int dap_dp_init(struct adiv5_dap *dap)
 			break;
 	}
 
-	retval = dap_queue_dp_write(dap, DP_CTRL_STAT, SSTICKYERR);
+	/*
+	 * This write operation clears the sticky error bit in jtag mode only and
+	 * is ignored in swd mode. It also powers-up system and debug domains in
+	 * both jtag and swd modes, if not done before.
+	 * Actually we do not need to clear the sticky error here because it has
+	 * been already cleared (if it was set) in the previous atomic read. This
+	 * write could be removed, but this initial part of dap_dp_init() is the
+	 * result of years of fine tuning and there are strong concerns about any
+	 * unnecessary code change. It doesn't harm, so let's keep it here and
+	 * preserve the historical sequence of read/write operations!
+	 */
+	retval = dap_queue_dp_write(dap, DP_CTRL_STAT, dap->dp_ctrl_stat | SSTICKYERR);
 	if (retval != ERROR_OK)
 		return retval;
 
@@ -694,7 +690,6 @@ int dap_dp_init(struct adiv5_dap *dap)
 	if (retval != ERROR_OK)
 		return retval;
 
-	dap->dp_ctrl_stat = CDBGPWRUPREQ | CSYSPWRUPREQ;
 	retval = dap_queue_dp_write(dap, DP_CTRL_STAT, dap->dp_ctrl_stat);
 	if (retval != ERROR_OK)
 		return retval;
@@ -707,12 +702,14 @@ int dap_dp_init(struct adiv5_dap *dap)
 	if (retval != ERROR_OK)
 		return retval;
 
-	LOG_DEBUG("DAP: wait CSYSPWRUPACK");
-	retval = dap_dp_poll_register(dap, DP_CTRL_STAT,
-				      CSYSPWRUPACK, CSYSPWRUPACK,
-				      DAP_POWER_DOMAIN_TIMEOUT);
-	if (retval != ERROR_OK)
-		return retval;
+	if (!dap->ignore_syspwrupack) {
+		LOG_DEBUG("DAP: wait CSYSPWRUPACK");
+		retval = dap_dp_poll_register(dap, DP_CTRL_STAT,
+					      CSYSPWRUPACK, CSYSPWRUPACK,
+					      DAP_POWER_DOMAIN_TIMEOUT);
+		if (retval != ERROR_OK)
+			return retval;
+	}
 
 	retval = dap_queue_dp_read(dap, DP_CTRL_STAT, NULL);
 	if (retval != ERROR_OK)
@@ -793,6 +790,77 @@ int mem_ap_init(struct adiv5_ap *ap)
 	return ERROR_OK;
 }
 
+/**
+ * Put the debug link into SWD mode, if the target supports it.
+ * The link's initial mode may be either JTAG (for example,
+ * with SWJ-DP after reset) or SWD.
+ *
+ * Note that targets using the JTAG-DP do not support SWD, and that
+ * some targets which could otherwise support it may have been
+ * configured to disable SWD signaling
+ *
+ * @param dap The DAP used
+ * @return ERROR_OK or else a fault code.
+ */
+int dap_to_swd(struct adiv5_dap *dap)
+{
+	int retval;
+
+	LOG_DEBUG("Enter SWD mode");
+
+	if (transport_is_jtag()) {
+		retval =  jtag_add_tms_seq(swd_seq_jtag_to_swd_len,
+				swd_seq_jtag_to_swd, TAP_INVALID);
+		if (retval == ERROR_OK)
+			retval = jtag_execute_queue();
+		return retval;
+	}
+
+	if (transport_is_swd()) {
+		const struct swd_driver *swd = adiv5_dap_swd_driver(dap);
+
+		return swd->switch_seq(JTAG_TO_SWD);
+	}
+
+	LOG_ERROR("Nor JTAG nor SWD transport");
+	return ERROR_FAIL;
+}
+
+/**
+ * Put the debug link into JTAG mode, if the target supports it.
+ * The link's initial mode may be either SWD or JTAG.
+ *
+ * Note that targets implemented with SW-DP do not support JTAG, and
+ * that some targets which could otherwise support it may have been
+ * configured to disable JTAG signaling
+ *
+ * @param dap The DAP used
+ * @return ERROR_OK or else a fault code.
+ */
+int dap_to_jtag(struct adiv5_dap *dap)
+{
+	int retval;
+
+	LOG_DEBUG("Enter JTAG mode");
+
+	if (transport_is_jtag()) {
+		retval = jtag_add_tms_seq(swd_seq_swd_to_jtag_len,
+				swd_seq_swd_to_jtag, TAP_RESET);
+		if (retval == ERROR_OK)
+			retval = jtag_execute_queue();
+		return retval;
+	}
+
+	if (transport_is_swd()) {
+		const struct swd_driver *swd = adiv5_dap_swd_driver(dap);
+
+		return swd->switch_seq(SWD_TO_JTAG);
+	}
+
+	LOG_ERROR("Nor JTAG nor SWD transport");
+	return ERROR_FAIL;
+}
+
 /* CID interpretation -- see ARM IHI 0029B section 3
  * and ARM IHI 0031A table 13-3.
  */
@@ -817,7 +885,7 @@ int dap_find_ap(struct adiv5_dap *dap, enum ap_type type_to_find, struct adiv5_a
 	int ap_num;
 
 	/* Maximum AP number is 255 since the SELECT register is 8 bits */
-	for (ap_num = 0; ap_num <= 255; ap_num++) {
+	for (ap_num = 0; ap_num <= DP_APSEL_MAX; ap_num++) {
 
 		/* read the IDR register of the Access Port */
 		uint32_t id_val = 0;
@@ -846,7 +914,8 @@ int dap_find_ap(struct adiv5_dap *dap, enum ap_type type_to_find, struct adiv5_a
 			((id_val & IDR_TYPE) == type_to_find)) {      /* type matches*/
 
 			LOG_DEBUG("Found %s at AP index: %d (IDR=0x%08" PRIX32 ")",
-						(type_to_find == AP_TYPE_AHB_AP)  ? "AHB-AP"  :
+						(type_to_find == AP_TYPE_AHB3_AP)  ? "AHB3-AP"  :
+						(type_to_find == AP_TYPE_AHB5_AP)  ? "AHB5-AP"  :
 						(type_to_find == AP_TYPE_APB_AP)  ? "APB-AP"  :
 						(type_to_find == AP_TYPE_AXI_AP)  ? "AXI-AP"  :
 						(type_to_find == AP_TYPE_JTAG_AP) ? "JTAG-AP" : "Unknown",
@@ -858,7 +927,8 @@ int dap_find_ap(struct adiv5_dap *dap, enum ap_type type_to_find, struct adiv5_a
 	}
 
 	LOG_DEBUG("No %s found",
-				(type_to_find == AP_TYPE_AHB_AP)  ? "AHB-AP"  :
+				(type_to_find == AP_TYPE_AHB3_AP)  ? "AHB3-AP"  :
+				(type_to_find == AP_TYPE_AHB5_AP)  ? "AHB5-AP"  :
 				(type_to_find == AP_TYPE_APB_AP)  ? "APB-AP"  :
 				(type_to_find == AP_TYPE_AXI_AP)  ? "AXI-AP"  :
 				(type_to_find == AP_TYPE_JTAG_AP) ? "JTAG-AP" : "Unknown");
@@ -1122,7 +1192,7 @@ static const struct {
 	{ ANY_ID, 0x343, "TI DAPCTL",                  "", }, /* from OMAP3 memmap */
 };
 
-static int dap_rom_display(struct command_context *cmd_ctx,
+static int dap_rom_display(struct command_invocation *cmd,
 				struct adiv5_ap *ap, uint32_t dbgbase, int depth)
 {
 	int retval;
@@ -1131,7 +1201,7 @@ static int dap_rom_display(struct command_context *cmd_ctx,
 	char tabs[16] = "";
 
 	if (depth > 16) {
-		command_print(cmd_ctx, "\tTables too deep");
+		command_print(cmd, "\tTables too deep");
 		return ERROR_FAIL;
 	}
 
@@ -1139,25 +1209,25 @@ static int dap_rom_display(struct command_context *cmd_ctx,
 		snprintf(tabs, sizeof(tabs), "[L%02d] ", depth);
 
 	uint32_t base_addr = dbgbase & 0xFFFFF000;
-	command_print(cmd_ctx, "\t\tComponent base address 0x%08" PRIx32, base_addr);
+	command_print(cmd, "\t\tComponent base address 0x%08" PRIx32, base_addr);
 
 	retval = dap_read_part_id(ap, base_addr, &cid, &pid);
 	if (retval != ERROR_OK) {
-		command_print(cmd_ctx, "\t\tCan't read component, the corresponding core might be turned off");
+		command_print(cmd, "\t\tCan't read component, the corresponding core might be turned off");
 		return ERROR_OK; /* Don't abort recursion */
 	}
 
 	if (!is_dap_cid_ok(cid)) {
-		command_print(cmd_ctx, "\t\tInvalid CID 0x%08" PRIx32, cid);
+		command_print(cmd, "\t\tInvalid CID 0x%08" PRIx32, cid);
 		return ERROR_OK; /* Don't abort recursion */
 	}
 
 	/* component may take multiple 4K pages */
 	uint32_t size = (pid >> 36) & 0xf;
 	if (size > 0)
-		command_print(cmd_ctx, "\t\tStart address 0x%08" PRIx32, (uint32_t)(base_addr - 0x1000 * size));
+		command_print(cmd, "\t\tStart address 0x%08" PRIx32, (uint32_t)(base_addr - 0x1000 * size));
 
-	command_print(cmd_ctx, "\t\tPeripheral ID 0x%010" PRIx64, pid);
+	command_print(cmd, "\t\tPeripheral ID 0x%010" PRIx64, pid);
 
 	uint8_t class = (cid >> 12) & 0xf;
 	uint16_t part_num = pid & 0xfff;
@@ -1165,12 +1235,12 @@ static int dap_rom_display(struct command_context *cmd_ctx,
 
 	if (designer_id & 0x80) {
 		/* JEP106 code */
-		command_print(cmd_ctx, "\t\tDesigner is 0x%03" PRIx16 ", %s",
+		command_print(cmd, "\t\tDesigner is 0x%03" PRIx16 ", %s",
 				designer_id, jep106_manufacturer(designer_id >> 8, designer_id & 0x7f));
 	} else {
 		/* Legacy ASCII ID, clear invalid bits */
 		designer_id &= 0x7f;
-		command_print(cmd_ctx, "\t\tDesigner ASCII code 0x%02" PRIx16 ", %s",
+		command_print(cmd, "\t\tDesigner ASCII code 0x%02" PRIx16 ", %s",
 				designer_id, designer_id == 0x41 ? "ARM" : "<unknown>");
 	}
 
@@ -1192,8 +1262,8 @@ static int dap_rom_display(struct command_context *cmd_ctx,
 		break;
 	}
 
-	command_print(cmd_ctx, "\t\tPart is 0x%" PRIx16", %s %s", part_num, type, full);
-	command_print(cmd_ctx, "\t\tComponent class is 0x%" PRIx8 ", %s", class, class_description[class]);
+	command_print(cmd, "\t\tPart is 0x%" PRIx16", %s %s", part_num, type, full);
+	command_print(cmd, "\t\tComponent class is 0x%" PRIx8 ", %s", class, class_description[class]);
 
 	if (class == 1) { /* ROM Table */
 		uint32_t memtype;
@@ -1202,9 +1272,9 @@ static int dap_rom_display(struct command_context *cmd_ctx,
 			return retval;
 
 		if (memtype & 0x01)
-			command_print(cmd_ctx, "\t\tMEMTYPE system memory present on bus");
+			command_print(cmd, "\t\tMEMTYPE system memory present on bus");
 		else
-			command_print(cmd_ctx, "\t\tMEMTYPE system memory not present: dedicated debug bus");
+			command_print(cmd, "\t\tMEMTYPE system memory not present: dedicated debug bus");
 
 		/* Read ROM table entries from base address until we get 0x00000000 or reach the reserved area */
 		for (uint16_t entry_offset = 0; entry_offset < 0xF00; entry_offset += 4) {
@@ -1212,17 +1282,17 @@ static int dap_rom_display(struct command_context *cmd_ctx,
 			retval = mem_ap_read_atomic_u32(ap, base_addr | entry_offset, &romentry);
 			if (retval != ERROR_OK)
 				return retval;
-			command_print(cmd_ctx, "\t%sROMTABLE[0x%x] = 0x%" PRIx32 "",
+			command_print(cmd, "\t%sROMTABLE[0x%x] = 0x%" PRIx32 "",
 					tabs, entry_offset, romentry);
 			if (romentry & 0x01) {
 				/* Recurse */
-				retval = dap_rom_display(cmd_ctx, ap, base_addr + (romentry & 0xFFFFF000), depth + 1);
+				retval = dap_rom_display(cmd, ap, base_addr + (romentry & 0xFFFFF000), depth + 1);
 				if (retval != ERROR_OK)
 					return retval;
 			} else if (romentry != 0) {
-				command_print(cmd_ctx, "\t\tComponent not present");
+				command_print(cmd, "\t\tComponent not present");
 			} else {
-				command_print(cmd_ctx, "\t%s\tEnd of ROM table", tabs);
+				command_print(cmd, "\t%s\tEnd of ROM table", tabs);
 				break;
 			}
 		}
@@ -1344,7 +1414,7 @@ static int dap_rom_display(struct command_context *cmd_ctx,
 			}
 			break;
 		case 6:
-			major = "Perfomance Monitor";
+			major = "Performance Monitor";
 			switch (minor) {
 			case 0:
 				subtype = "other";
@@ -1367,7 +1437,7 @@ static int dap_rom_display(struct command_context *cmd_ctx,
 			}
 			break;
 		}
-		command_print(cmd_ctx, "\t\tType is 0x%02" PRIx8 ", %s, %s",
+		command_print(cmd, "\t\tType is 0x%02" PRIx8 ", %s, %s",
 				(uint8_t)(devtype & 0xff),
 				major, subtype);
 		/* REVISIT also show 0xfc8 DevId */
@@ -1376,7 +1446,7 @@ static int dap_rom_display(struct command_context *cmd_ctx,
 	return ERROR_OK;
 }
 
-static int dap_info_command(struct command_context *cmd_ctx,
+int dap_info_command(struct command_invocation *cmd,
 		struct adiv5_ap *ap)
 {
 	int retval;
@@ -1388,27 +1458,30 @@ static int dap_info_command(struct command_context *cmd_ctx,
 	if (retval != ERROR_OK)
 		return retval;
 
-	command_print(cmd_ctx, "AP ID register 0x%8.8" PRIx32, apid);
+	command_print(cmd, "AP ID register 0x%8.8" PRIx32, apid);
 	if (apid == 0) {
-		command_print(cmd_ctx, "No AP found at this ap 0x%x", ap->ap_num);
+		command_print(cmd, "No AP found at this ap 0x%x", ap->ap_num);
 		return ERROR_FAIL;
 	}
 
 	switch (apid & (IDR_JEP106 | IDR_TYPE)) {
 	case IDR_JEP106_ARM | AP_TYPE_JTAG_AP:
-		command_print(cmd_ctx, "\tType is JTAG-AP");
+		command_print(cmd, "\tType is JTAG-AP");
 		break;
-	case IDR_JEP106_ARM | AP_TYPE_AHB_AP:
-		command_print(cmd_ctx, "\tType is MEM-AP AHB");
+	case IDR_JEP106_ARM | AP_TYPE_AHB3_AP:
+		command_print(cmd, "\tType is MEM-AP AHB3");
+		break;
+	case IDR_JEP106_ARM | AP_TYPE_AHB5_AP:
+		command_print(cmd, "\tType is MEM-AP AHB5");
 		break;
 	case IDR_JEP106_ARM | AP_TYPE_APB_AP:
-		command_print(cmd_ctx, "\tType is MEM-AP APB");
+		command_print(cmd, "\tType is MEM-AP APB");
 		break;
 	case IDR_JEP106_ARM | AP_TYPE_AXI_AP:
-		command_print(cmd_ctx, "\tType is MEM-AP AXI");
+		command_print(cmd, "\tType is MEM-AP AXI");
 		break;
 	default:
-		command_print(cmd_ctx, "\tUnknown AP type");
+		command_print(cmd, "\tUnknown AP type");
 		break;
 	}
 
@@ -1417,63 +1490,152 @@ static int dap_info_command(struct command_context *cmd_ctx,
 	 */
 	mem_ap = (apid & IDR_CLASS) == AP_CLASS_MEM_AP;
 	if (mem_ap) {
-		command_print(cmd_ctx, "MEM-AP BASE 0x%8.8" PRIx32, dbgbase);
+		command_print(cmd, "MEM-AP BASE 0x%8.8" PRIx32, dbgbase);
 
 		if (dbgbase == 0xFFFFFFFF || (dbgbase & 0x3) == 0x2) {
-			command_print(cmd_ctx, "\tNo ROM table present");
+			command_print(cmd, "\tNo ROM table present");
 		} else {
 			if (dbgbase & 0x01)
-				command_print(cmd_ctx, "\tValid ROM table present");
+				command_print(cmd, "\tValid ROM table present");
 			else
-				command_print(cmd_ctx, "\tROM table in legacy format");
+				command_print(cmd, "\tROM table in legacy format");
 
-			dap_rom_display(cmd_ctx, ap, dbgbase & 0xFFFFF000, 0);
+			dap_rom_display(cmd, ap, dbgbase & 0xFFFFF000, 0);
 		}
 	}
 
 	return ERROR_OK;
 }
 
+enum adiv5_cfg_param {
+	CFG_DAP,
+	CFG_AP_NUM
+};
+
+static const Jim_Nvp nvp_config_opts[] = {
+	{ .name = "-dap",    .value = CFG_DAP },
+	{ .name = "-ap-num", .value = CFG_AP_NUM },
+	{ .name = NULL, .value = -1 }
+};
+
 int adiv5_jim_configure(struct target *target, Jim_GetOptInfo *goi)
 {
 	struct adiv5_private_config *pc;
-	const char *arg;
-	jim_wide ap_num;
 	int e;
 
-	/* check if argv[0] is for us */
-	arg = Jim_GetString(goi->argv[0], NULL);
-	if (strcmp(arg, "-ap-num"))
-		return JIM_CONTINUE;
-
-	e = Jim_GetOpt_String(goi, &arg, NULL);
-	if (e != JIM_OK)
-		return e;
-
-	if (goi->argc == 0) {
-		Jim_WrongNumArgs(goi->interp, goi->argc, goi->argv, "-ap-num ?ap-number? ...");
-		return JIM_ERR;
-	}
-
-	e = Jim_GetOpt_Wide(goi, &ap_num);
-	if (e != JIM_OK)
-		return e;
-
-	if (target->private_config == NULL) {
+	pc = (struct adiv5_private_config *)target->private_config;
+	if (pc == NULL) {
 		pc = calloc(1, sizeof(struct adiv5_private_config));
+		pc->ap_num = DP_APSEL_INVALID;
 		target->private_config = pc;
-		pc->ap_num = ap_num;
 	}
 
+	target->has_dap = true;
+
+	if (goi->argc > 0) {
+		Jim_Nvp *n;
+
+		Jim_SetEmptyResult(goi->interp);
+
+		/* check first if topmost item is for us */
+		e = Jim_Nvp_name2value_obj(goi->interp, nvp_config_opts,
+								   goi->argv[0], &n);
+		if (e != JIM_OK)
+			return JIM_CONTINUE;
+
+		e = Jim_GetOpt_Obj(goi, NULL);
+		if (e != JIM_OK)
+			return e;
+
+		switch (n->value) {
+		case CFG_DAP:
+			if (goi->isconfigure) {
+				Jim_Obj *o_t;
+				struct adiv5_dap *dap;
+				e = Jim_GetOpt_Obj(goi, &o_t);
+				if (e != JIM_OK)
+					return e;
+				dap = dap_instance_by_jim_obj(goi->interp, o_t);
+				if (dap == NULL) {
+					Jim_SetResultString(goi->interp, "DAP name invalid!", -1);
+					return JIM_ERR;
+				}
+				if (pc->dap != NULL && pc->dap != dap) {
+					Jim_SetResultString(goi->interp,
+						"DAP assignment cannot be changed after target was created!", -1);
+					return JIM_ERR;
+				}
+				if (target->tap_configured) {
+					Jim_SetResultString(goi->interp,
+						"-chain-position and -dap configparams are mutually exclusive!", -1);
+					return JIM_ERR;
+				}
+				pc->dap = dap;
+				target->tap = dap->tap;
+				target->dap_configured = true;
+			} else {
+				if (goi->argc != 0) {
+					Jim_WrongNumArgs(goi->interp,
+										goi->argc, goi->argv,
+					"NO PARAMS");
+					return JIM_ERR;
+				}
+
+				if (pc->dap == NULL) {
+					Jim_SetResultString(goi->interp, "DAP not configured", -1);
+					return JIM_ERR;
+				}
+				Jim_SetResultString(goi->interp, adiv5_dap_name(pc->dap), -1);
+			}
+			break;
+
+		case CFG_AP_NUM:
+			if (goi->isconfigure) {
+				jim_wide ap_num;
+				e = Jim_GetOpt_Wide(goi, &ap_num);
+				if (e != JIM_OK)
+					return e;
+				if (ap_num < 0 || ap_num > DP_APSEL_MAX) {
+					Jim_SetResultString(goi->interp, "Invalid AP number!", -1);
+					return JIM_ERR;
+				}
+				pc->ap_num = ap_num;
+			} else {
+				if (goi->argc != 0) {
+					Jim_WrongNumArgs(goi->interp,
+									 goi->argc, goi->argv,
+					  "NO PARAMS");
+					return JIM_ERR;
+				}
+
+				if (pc->ap_num == DP_APSEL_INVALID) {
+					Jim_SetResultString(goi->interp, "AP number not configured", -1);
+					return JIM_ERR;
+				}
+				Jim_SetResult(goi->interp, Jim_NewIntObj(goi->interp, pc->ap_num));
+			}
+			break;
+		}
+	}
 
 	return JIM_OK;
 }
 
+int adiv5_verify_config(struct adiv5_private_config *pc)
+{
+	if (pc == NULL)
+		return ERROR_FAIL;
+
+	if (pc->dap == NULL)
+		return ERROR_FAIL;
+
+	return ERROR_OK;
+}
+
+
 COMMAND_HANDLER(handle_dap_info_command)
 {
-	struct target *target = get_current_target(CMD_CTX);
-	struct arm *arm = target_to_arm(target);
-	struct adiv5_dap *dap = arm->dap;
+	struct adiv5_dap *dap = adiv5_get_dap(CMD_DATA);
 	uint32_t apsel;
 
 	switch (CMD_ARGC) {
@@ -1482,22 +1644,19 @@ COMMAND_HANDLER(handle_dap_info_command)
 		break;
 	case 1:
 		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], apsel);
-		if (apsel >= 256)
+		if (apsel > DP_APSEL_MAX)
 			return ERROR_COMMAND_SYNTAX_ERROR;
 		break;
 	default:
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
-	return dap_info_command(CMD_CTX, &dap->ap[apsel]);
+	return dap_info_command(CMD, &dap->ap[apsel]);
 }
 
 COMMAND_HANDLER(dap_baseaddr_command)
 {
-	struct target *target = get_current_target(CMD_CTX);
-	struct arm *arm = target_to_arm(target);
-	struct adiv5_dap *dap = arm->dap;
-
+	struct adiv5_dap *dap = adiv5_get_dap(CMD_DATA);
 	uint32_t apsel, baseaddr;
 	int retval;
 
@@ -1508,7 +1667,7 @@ COMMAND_HANDLER(dap_baseaddr_command)
 	case 1:
 		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], apsel);
 		/* AP address is in bits 31:24 of DP_SELECT */
-		if (apsel >= 256)
+		if (apsel > DP_APSEL_MAX)
 			return ERROR_COMMAND_SYNTAX_ERROR;
 		break;
 	default:
@@ -1527,17 +1686,14 @@ COMMAND_HANDLER(dap_baseaddr_command)
 	if (retval != ERROR_OK)
 		return retval;
 
-	command_print(CMD_CTX, "0x%8.8" PRIx32, baseaddr);
+	command_print(CMD, "0x%8.8" PRIx32, baseaddr);
 
 	return retval;
 }
 
 COMMAND_HANDLER(dap_memaccess_command)
 {
-	struct target *target = get_current_target(CMD_CTX);
-	struct arm *arm = target_to_arm(target);
-	struct adiv5_dap *dap = arm->dap;
-
+	struct adiv5_dap *dap = adiv5_get_dap(CMD_DATA);
 	uint32_t memaccess_tck;
 
 	switch (CMD_ARGC) {
@@ -1552,7 +1708,7 @@ COMMAND_HANDLER(dap_memaccess_command)
 	}
 	dap->ap[dap->apsel].memaccess_tck = memaccess_tck;
 
-	command_print(CMD_CTX, "memory bus access delay set to %" PRIi32 " tck",
+	command_print(CMD, "memory bus access delay set to %" PRIi32 " tck",
 			dap->ap[dap->apsel].memaccess_tck);
 
 	return ERROR_OK;
@@ -1560,21 +1716,17 @@ COMMAND_HANDLER(dap_memaccess_command)
 
 COMMAND_HANDLER(dap_apsel_command)
 {
-	struct target *target = get_current_target(CMD_CTX);
-	struct arm *arm = target_to_arm(target);
-	struct adiv5_dap *dap = arm->dap;
-
-	uint32_t apsel, apid;
-	int retval;
+	struct adiv5_dap *dap = adiv5_get_dap(CMD_DATA);
+	uint32_t apsel;
 
 	switch (CMD_ARGC) {
 	case 0:
-		apsel = dap->apsel;
-		break;
+		command_print(CMD, "%" PRIi32, dap->apsel);
+		return ERROR_OK;
 	case 1:
 		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], apsel);
 		/* AP address is in bits 31:24 of DP_SELECT */
-		if (apsel >= 256)
+		if (apsel > DP_APSEL_MAX)
 			return ERROR_COMMAND_SYNTAX_ERROR;
 		break;
 	default:
@@ -1582,42 +1734,40 @@ COMMAND_HANDLER(dap_apsel_command)
 	}
 
 	dap->apsel = apsel;
-
-	retval = dap_queue_ap_read(dap_ap(dap, apsel), AP_REG_IDR, &apid);
-	if (retval != ERROR_OK)
-		return retval;
-	retval = dap_run(dap);
-	if (retval != ERROR_OK)
-		return retval;
-
-	command_print(CMD_CTX, "ap %" PRIi32 " selected, identification register 0x%8.8" PRIx32,
-			apsel, apid);
-
-	return retval;
+	return ERROR_OK;
 }
 
 COMMAND_HANDLER(dap_apcsw_command)
 {
-	struct target *target = get_current_target(CMD_CTX);
-	struct arm *arm = target_to_arm(target);
-	struct adiv5_dap *dap = arm->dap;
-
-	uint32_t apcsw = dap->ap[dap->apsel].csw_default, sprot = 0;
+	struct adiv5_dap *dap = adiv5_get_dap(CMD_DATA);
+	uint32_t apcsw = dap->ap[dap->apsel].csw_default;
+	uint32_t csw_val, csw_mask;
 
 	switch (CMD_ARGC) {
 	case 0:
-		command_print(CMD_CTX, "apsel %" PRIi32 " selected, csw 0x%8.8" PRIx32,
-			(dap->apsel), apcsw);
-		break;
+		command_print(CMD, "ap %" PRIi32 " selected, csw 0x%8.8" PRIx32,
+			dap->apsel, apcsw);
+		return ERROR_OK;
 	case 1:
-		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], sprot);
-		/* AP address is in bits 31:24 of DP_SELECT */
-		if (sprot > 1)
-			return ERROR_COMMAND_SYNTAX_ERROR;
-		if (sprot)
-			apcsw |= CSW_SPROT;
+		if (strcmp(CMD_ARGV[0], "default") == 0)
+			csw_val = CSW_AHB_DEFAULT;
 		else
-			apcsw &= ~CSW_SPROT;
+			COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], csw_val);
+
+		if (csw_val & (CSW_SIZE_MASK | CSW_ADDRINC_MASK)) {
+			LOG_ERROR("CSW value cannot include 'Size' and 'AddrInc' bit-fields");
+			return ERROR_COMMAND_SYNTAX_ERROR;
+		}
+		apcsw = csw_val;
+		break;
+	case 2:
+		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], csw_val);
+		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], csw_mask);
+		if (csw_mask & (CSW_SIZE_MASK | CSW_ADDRINC_MASK)) {
+			LOG_ERROR("CSW mask cannot include 'Size' and 'AddrInc' bit-fields");
+			return ERROR_COMMAND_SYNTAX_ERROR;
+		}
+		apcsw = (apcsw & ~csw_mask) | (csw_val & csw_mask);
 		break;
 	default:
 		return ERROR_COMMAND_SYNTAX_ERROR;
@@ -1631,10 +1781,7 @@ COMMAND_HANDLER(dap_apcsw_command)
 
 COMMAND_HANDLER(dap_apid_command)
 {
-	struct target *target = get_current_target(CMD_CTX);
-	struct arm *arm = target_to_arm(target);
-	struct adiv5_dap *dap = arm->dap;
-
+	struct adiv5_dap *dap = adiv5_get_dap(CMD_DATA);
 	uint32_t apsel, apid;
 	int retval;
 
@@ -1645,7 +1792,7 @@ COMMAND_HANDLER(dap_apid_command)
 	case 1:
 		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], apsel);
 		/* AP address is in bits 31:24 of DP_SELECT */
-		if (apsel >= 256)
+		if (apsel > DP_APSEL_MAX)
 			return ERROR_COMMAND_SYNTAX_ERROR;
 		break;
 	default:
@@ -1659,18 +1806,16 @@ COMMAND_HANDLER(dap_apid_command)
 	if (retval != ERROR_OK)
 		return retval;
 
-	command_print(CMD_CTX, "0x%8.8" PRIx32, apid);
+	command_print(CMD, "0x%8.8" PRIx32, apid);
 
 	return retval;
 }
 
 COMMAND_HANDLER(dap_apreg_command)
 {
-	struct target *target = get_current_target(CMD_CTX);
-	struct arm *arm = target_to_arm(target);
-	struct adiv5_dap *dap = arm->dap;
-
+	struct adiv5_dap *dap = adiv5_get_dap(CMD_DATA);
 	uint32_t apsel, reg, value;
+	struct adiv5_ap *ap;
 	int retval;
 
 	if (CMD_ARGC < 2 || CMD_ARGC > 3)
@@ -1678,8 +1823,9 @@ COMMAND_HANDLER(dap_apreg_command)
 
 	COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], apsel);
 	/* AP address is in bits 31:24 of DP_SELECT */
-	if (apsel >= 256)
+	if (apsel > DP_APSEL_MAX)
 		return ERROR_COMMAND_SYNTAX_ERROR;
+	ap = dap_ap(dap, apsel);
 
 	COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], reg);
 	if (reg >= 256 || (reg & 3))
@@ -1687,9 +1833,23 @@ COMMAND_HANDLER(dap_apreg_command)
 
 	if (CMD_ARGC == 3) {
 		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[2], value);
-		retval = dap_queue_ap_write(dap_ap(dap, apsel), reg, value);
+		switch (reg) {
+		case MEM_AP_REG_CSW:
+			ap->csw_value = 0;  /* invalid, in case write fails */
+			retval = dap_queue_ap_write(ap, reg, value);
+			if (retval == ERROR_OK)
+				ap->csw_value = value;
+			break;
+		case MEM_AP_REG_TAR:
+			ap->tar_valid = false;  /* invalid, force write */
+			retval = mem_ap_setup_tar(ap, value);
+			break;
+		default:
+			retval = dap_queue_ap_write(ap, reg, value);
+			break;
+		}
 	} else {
-		retval = dap_queue_ap_read(dap_ap(dap, apsel), reg, &value);
+		retval = dap_queue_ap_read(ap, reg, &value);
 	}
 	if (retval == ERROR_OK)
 		retval = dap_run(dap);
@@ -1698,17 +1858,45 @@ COMMAND_HANDLER(dap_apreg_command)
 		return retval;
 
 	if (CMD_ARGC == 2)
-		command_print(CMD_CTX, "0x%08" PRIx32, value);
+		command_print(CMD, "0x%08" PRIx32, value);
+
+	return retval;
+}
+
+COMMAND_HANDLER(dap_dpreg_command)
+{
+	struct adiv5_dap *dap = adiv5_get_dap(CMD_DATA);
+	uint32_t reg, value;
+	int retval;
+
+	if (CMD_ARGC < 1 || CMD_ARGC > 2)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], reg);
+	if (reg >= 256 || (reg & 3))
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	if (CMD_ARGC == 2) {
+		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], value);
+		retval = dap_queue_dp_write(dap, reg, value);
+	} else {
+		retval = dap_queue_dp_read(dap, reg, &value);
+	}
+	if (retval == ERROR_OK)
+		retval = dap_run(dap);
+
+	if (retval != ERROR_OK)
+		return retval;
+
+	if (CMD_ARGC == 1)
+		command_print(CMD, "0x%08" PRIx32, value);
 
 	return retval;
 }
 
 COMMAND_HANDLER(dap_ti_be_32_quirks_command)
 {
-	struct target *target = get_current_target(CMD_CTX);
-	struct arm *arm = target_to_arm(target);
-	struct adiv5_dap *dap = arm->dap;
-
+	struct adiv5_dap *dap = adiv5_get_dap(CMD_DATA);
 	uint32_t enable = dap->ti_be_32_quirks;
 
 	switch (CMD_ARGC) {
@@ -1723,13 +1911,13 @@ COMMAND_HANDLER(dap_ti_be_32_quirks_command)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 	dap->ti_be_32_quirks = enable;
-	command_print(CMD_CTX, "TI BE-32 quirks mode %s",
+	command_print(CMD, "TI BE-32 quirks mode %s",
 		enable ? "enabled" : "disabled");
 
 	return 0;
 }
 
-static const struct command_registration dap_commands[] = {
+const struct command_registration dap_instance_commands[] = {
 	{
 		.name = "info",
 		.handler = handle_dap_info_command,
@@ -1741,7 +1929,7 @@ static const struct command_registration dap_commands[] = {
 	{
 		.name = "apsel",
 		.handler = dap_apsel_command,
-		.mode = COMMAND_EXEC,
+		.mode = COMMAND_ANY,
 		.help = "Set the currently selected AP (default 0) "
 			"and display the result",
 		.usage = "[ap_num]",
@@ -1749,9 +1937,9 @@ static const struct command_registration dap_commands[] = {
 	{
 		.name = "apcsw",
 		.handler = dap_apcsw_command,
-		.mode = COMMAND_EXEC,
-		.help = "Set csw access bit ",
-		.usage = "[sprot]",
+		.mode = COMMAND_ANY,
+		.help = "Set CSW default bits",
+		.usage = "[value [mask]]",
 	},
 
 	{
@@ -1769,6 +1957,14 @@ static const struct command_registration dap_commands[] = {
 		.help = "read/write a register from AP "
 			"(reg is byte address of a word register, like 0 4 8...)",
 		.usage = "ap_num reg [value]",
+	},
+	{
+		.name = "dpreg",
+		.handler = dap_dpreg_command,
+		.mode = COMMAND_EXEC,
+		.help = "read/write a register from DP "
+			"(reg is byte address (bank << 4 | reg) of a word register, like 0 4 8...)",
+		.usage = "reg [value]",
 	},
 	{
 		.name = "baseaddr",
@@ -1792,17 +1988,6 @@ static const struct command_registration dap_commands[] = {
 		.mode = COMMAND_CONFIG,
 		.help = "set/get quirks mode for TI TMS450/TMS570 processors",
 		.usage = "[enable]",
-	},
-	COMMAND_REGISTRATION_DONE
-};
-
-const struct command_registration dap_command_handlers[] = {
-	{
-		.name = "dap",
-		.mode = COMMAND_EXEC,
-		.help = "DAP command group",
-		.usage = "",
-		.chain = dap_commands,
 	},
 	COMMAND_REGISTRATION_DONE
 };
