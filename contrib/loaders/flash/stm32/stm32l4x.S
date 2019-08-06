@@ -46,37 +46,9 @@
 
 #define STM32_PROG	 0x1	/* PG */
 
-	.macro txa v
-	movs	r6, #0x20 * \v
-	str	r6, [r7, #0x14]
-	.endm
 	.thumb_func
 	.global _start
 _start:
-	b	run
-test:	ldr	r4, =#0x40022000
-	ldr	r0, =#0x20000200
-	ldr	r1, =#0x20004200
-	ldr	r2, =#0x08000010
-	mov	r6, r0
-	adds	r6, #8
-	str	r6, [r0]
-	str	r6, [r0,#4]
-	movs	r3, #2
-	ldr	r6, [r4, #STM32_FLASH_CR_OFFSET]
-	lsrs	r6, #32
-	bcc	run
-	ldr	r6, =#0x45670123
-	str	r6, [r4, #8]
-	ldr	r6, =#0xCDEF89AB
-	str	r6, [r4, #8]
-run:
-	ldr	r6, =#0x40021000	/* RCC */
-	movs	r5, #15
-	str	r5, [r6,#0x34]		/* en gpios */
-	ldr	r7, =#0x50000000	/* GPIOA base */
-	ldr	r5, =#0xEBFFF7FF	@ PA5 out
-	str	r5, [r7]
 wait_fifo:
 	ldr 	r6, [r0, #0]	/* read wp */
 	cmp 	r6, #0		/* abort if wp == 0 */
@@ -92,24 +64,17 @@ no_wrap:
 
 	ldr	r6, =STM32_PROG
 	str	r6, [r4, #STM32_FLASH_CR_OFFSET]
-	dsb
 	ldr 	r6, [r5]	/* read one word from src */
 	str 	r6, [r2]	/* write one word to dst */
-	dsb
 	ldr 	r6, [r5,#4]
 	str 	r6, [r2,#4]
 	dsb
-	txa 1
 	adds	r5, #8		/* inc pointers */
 	adds	r2, #8
-@	ldr	r6, =#100	/* delay needed (reason unknown) */
-@wait:	subs	r6, #1
-@	bne wait
 busy:
 	ldr 	r6, [r4, #STM32_FLASH_SR_OFFSET]
 	lsrs	r6, #17		/* BSY (bit16) == 1 => operation in progress */
 	bcs 	busy		/* wait more... */
-	txa 0
 	mov	r10, r5
 	movs	r5, #0xfa	/* PGSERR | PGPERR | PGAERR | WRPERR | PROGERR*/
 	ldr 	r6, [r4, #STM32_FLASH_SR_OFFSET]
@@ -127,19 +92,9 @@ no_wrap2:
 	beq	exit		
 	b	wait_fifo	/* loop if not done */
 error:
-	txa 1
-	txa 0
-	txa 1
-	txa 0
-	txa 1
-	txa 0
 	movs	r1, #0
 	str	r1, [r0, #4]	/* set rp = 0 on error */
 exit:
-	txa 1
-	txa 0
-	txa 1
-	txa 0
 	mov	r0, r6		/* return status in r0 */
 	bkpt	#0x00
 
