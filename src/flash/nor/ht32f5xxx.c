@@ -268,9 +268,9 @@ COMMAND_HANDLER(ht32f5xxx_handle_mass_erase_command)
         for (i = 0; i < bank->num_sectors; i++)
             bank->sectors[i].is_erased = 1;
 
-        command_print(CMD_CTX, "ht32f5xxx mass erase complete");
+        command_print(CMD, "ht32f5xxx mass erase complete");
     } else {
-        command_print(CMD_CTX, "ht32f5xxx mass erase failed");
+        command_print(CMD, "ht32f5xxx mass erase failed");
     }
 
     return retval;
@@ -297,9 +297,9 @@ COMMAND_HANDLER(ht32f5xxx_handle_test_write)
 
     retval = ht32f5xxx_write(bank, buffer, 0, 32);
     if (retval == ERROR_OK) {
-        command_print(CMD_CTX, "ht32f5xxx test write complete");
+        command_print(CMD, "ht32f5xxx test write complete");
     } else {
-        command_print(CMD_CTX, "ht32f5xxx test write failed");
+        command_print(CMD, "ht32f5xxx test write failed");
     }
 
     return retval;

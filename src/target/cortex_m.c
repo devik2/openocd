@@ -2622,7 +2622,7 @@ COMMAND_HANDLER(handle_cortex_m_dcc_emu_command)
 	struct cortex_m_common *cortex_m = target_to_cm(target);
 	int retval;
 
-	retval = cortex_m_verify_pointer(CMD_CTX, cortex_m);
+	retval = cortex_m_verify_pointer(CMD, cortex_m);
 	if (retval != ERROR_OK)
 		return retval;
 
@@ -2630,7 +2630,7 @@ COMMAND_HANDLER(handle_cortex_m_dcc_emu_command)
 		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], cortex_m->dcc_emu_width);
 		if (cortex_m->dcc_emu_width != 8 && 
 				cortex_m->dcc_emu_width != 32) {
-			command_print(CMD_CTX, "cortex_m dcc_emu: width can be 8 or 32 only");
+			command_print(CMD, "cortex_m dcc_emu: width can be 8 or 32 only");
 
 			return ERROR_OK;
 		}
@@ -2646,7 +2646,7 @@ COMMAND_HANDLER(handle_cortex_m_dcc_emu_command)
 		}
 	}
 
-	command_print(CMD_CTX, "cortex_m dcc_emu address 0x%8.8" PRIx32
+	command_print(CMD, "cortex_m dcc_emu address 0x%8.8" PRIx32
 			" width %d", 
 			cortex_m->dcc_emu_address, cortex_m->dcc_emu_width);
 
