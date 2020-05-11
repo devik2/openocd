@@ -2332,6 +2332,13 @@ static int cortex_m_target_request_data(struct target *target,
 		int retval = cortex_m_dcc_read(target, buffer+i, &ctrl);
 		if (retval != ERROR_OK)
 			return retval;
+		if (!ctrl) { // we are too fast, wait
+			LOG_DEBUG("wait for DCC data");
+			alive_sleep(2);
+			retval = cortex_m_dcc_read(target, buffer+i, &ctrl);
+			if (retval != ERROR_OK)
+				return retval;
+		}
 	}
 
 	return ERROR_OK;
