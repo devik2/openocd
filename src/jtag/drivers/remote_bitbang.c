@@ -232,7 +232,6 @@ static struct bitbang_interface remote_bitbang_bitbang = {
 	.sample = &remote_bitbang_sample,
 	.read_sample = &remote_bitbang_read_sample,
 	.write = &remote_bitbang_write,
-	.reset = &remote_bitbang_reset,
 	.blink = &remote_bitbang_blink,
 //	.swdio_read = remote_gpio_swdio_read,
 	.swdio_drive = remote_gpio_swdio_drive,
@@ -478,12 +477,11 @@ static const struct swd_driver remote_swd = {
 #endif
 static const char * const remote_transports[] = { "jtag", "swd", NULL };
 
-struct jtag_interface remote_bitbang_interface = {
+<<<<<<< HEAD
+static struct jtag_interface remote_bitbang_interface = {
 	.name = "remote_bitbang",
-	.transports = remote_transports,
-	.commands = remote_bitbang_command_handlers,
-	.init = &remote_bitbang_init,
-	.quit = &remote_bitbang_quit,
+=======
+static struct jtag_interface remote_bitbang_interface = {
 #if NAT_SWD
 	.swd = &remote_swd,
 	.execute_queue = &remote_swd_init,
@@ -491,4 +489,16 @@ struct jtag_interface remote_bitbang_interface = {
 	.swd = &bitbang_swd,
 	.execute_queue = &bitbang_execute_queue,
 #endif
+};
+
+struct adapter_driver remote_bitbang_adapter_driver = {
+	.name = "remote_bitbang",
+	.transports = remote_transports,
+	.commands = remote_bitbang_command_handlers,
+
+	.init = &remote_bitbang_init,
+	.quit = &remote_bitbang_quit,
+	.reset = &remote_bitbang_reset,
+
+	.jtag_ops = &remote_bitbang_interface,
 };
