@@ -20,8 +20,11 @@
 #include "config.h"
 #endif
 
+#define NAT_SWD 1
+
 #ifndef _WIN32
 #include <sys/un.h>
+#include <netinet/tcp.h>
 #include <netdb.h>
 #endif
 #include <jtag/interface.h>
@@ -157,6 +160,26 @@ static bb_value_t remote_bitbang_rread(void)
 	}
 }
 
+static char remote_bitbang_rread2(void)
+{
+	if (EOF == fflush(remote_bitbang_file)) {
+		remote_bitbang_quit();
+		LOG_ERROR("fflush: %s", strerror(errno));
+		return BB_ERROR;
+	}
+
+	/* Enable blocking access. */
+	socket_block(remote_bitbang_fd);
+	char c;
+	ssize_t count = read(remote_bitbang_fd, &c, 1);
+	if (count == 1) {
+		return c;
+	} else {
+		remote_bitbang_quit();
+		LOG_ERROR("read: count=%d, error=%s", (int) count, strerror(errno));
+		return BB_ERROR;
+	}
+}
 static int remote_bitbang_sample(void)
 {
 	if (remote_bitbang_fill_buf() != ERROR_OK)
@@ -194,6 +217,16 @@ static int remote_bitbang_blink(int on)
 	return remote_bitbang_putc(c);
 }
 
+static void remote_gpio_swdio_drive(bool is_output)
+{
+	remote_bitbang_putc(is_output ? 'D' : 'd');
+}
+#if 0
+static int remote_gpio_swdio_read(void)
+{
+	return remote_bitbang_read_sample();
+}
+#endif
 static struct bitbang_interface remote_bitbang_bitbang = {
 	.buf_size = sizeof(remote_bitbang_buf) - 1,
 	.sample = &remote_bitbang_sample,
@@ -201,6 +234,8 @@ static struct bitbang_interface remote_bitbang_bitbang = {
 	.write = &remote_bitbang_write,
 	.reset = &remote_bitbang_reset,
 	.blink = &remote_bitbang_blink,
+//	.swdio_read = remote_gpio_swdio_read,
+	.swdio_drive = remote_gpio_swdio_drive,
 };
 
 static int remote_bitbang_init_tcp(void)
@@ -242,6 +277,8 @@ static int remote_bitbang_init_tcp(void)
 		LOG_ERROR("Failed to connect: %s", strerror(errno));
 		return ERROR_FAIL;
 	}
+	int i = 1;
+	setsockopt( fd, IPPROTO_TCP, TCP_NODELAY, (void *)&i, sizeof(i));
 
 	return fd;
 }
@@ -341,12 +378,117 @@ static const struct command_registration remote_bitbang_command_handlers[] = {
 	},
 	COMMAND_REGISTRATION_DONE,
 };
+#if NAT_SWD
+static int remote_swd_init(void)
+{
+	return ERROR_OK;
+}
+
+static void send_cmd(char cmd,const uint8_t *data,int sz)
+{
+	const char *tab = "0123456789abcdef";
+	remote_bitbang_putc(cmd);
+	int i;
+	for (i=0;i<sz;i++) {
+		remote_bitbang_putc(tab[data[i] & 15]);
+		remote_bitbang_putc(tab[data[i] >> 4]);
+	}
+	remote_bitbang_putc('\n');
+}
+
+static int remote_swd_switch_seq(enum swd_special_seq seq)
+{
+	int slen = 0;
+	const uint8_t *s = 0;;
+	switch (seq) {
+		case LINE_RESET:  s = swd_seq_line_reset;  slen = swd_seq_line_reset_len; break;
+		case JTAG_TO_SWD: s = swd_seq_jtag_to_swd; slen = swd_seq_jtag_to_swd_len; break;
+		case SWD_TO_JTAG: s = swd_seq_swd_to_jtag; slen = swd_seq_swd_to_jtag_len; break;
+		default: break;
+	}
+	int blen = (slen+7)/8;
+	if (s) send_cmd('C',s,blen);
+	return ERROR_OK;
+}
+
+static void remote_swd_write_reg(uint8_t cmd, uint32_t value, uint32_t ap_delay_clk)
+{
+	assert(!(cmd & SWD_CMD_RnW));
+	LOG_DEBUG("WREG %X %X %d\n",(cmd<<1)&0x34,value,ap_delay_clk);
+	cmd |= SWD_CMD_START | (1 << 7);
+	uint8_t buf[8];
+	buf[0] = cmd;
+	memcpy(buf+1,&value,4);
+	buf[5] = ap_delay_clk>255 ? 255:ap_delay_clk;
+	send_cmd('w',buf,ap_delay_clk ? 6:5);
+}
+
+static void remote_swd_read_reg(uint8_t cmd, uint32_t *value, uint32_t ap_delay_clk)
+{
+	assert(cmd & SWD_CMD_RnW);
+	LOG_DEBUG("RREG %X %p %d\n",(cmd<<1)&0x34,value,ap_delay_clk);
+	cmd |= SWD_CMD_START | (1 << 7);
+	uint8_t buf[4];
+	buf[0] = cmd;
+	buf[1] = ap_delay_clk>255 ? 255:ap_delay_clk;
+	if (!value) buf[1] |= 0x80;
+	send_cmd('r',buf,buf[1] ? 2:1);
+	if (!value) return;
+	char c = remote_bitbang_rread2();
+	if (c!='r') printf("ERROR:%X",c);
+	assert (c=='r');
+	uint32_t x = 0;
+	int i,m=0;
+	for (i=0;i<8;i++,m+=4) {
+		c = remote_bitbang_rread2();
+		x |= (c>='a' ? c-'a'+10 : c-'0')<<m;
+	}
+	c = remote_bitbang_rread2();
+	c = remote_bitbang_rread2();
+	*value = x;
+}
+
+static int remote_swd_run_queue(void)
+{
+	LOG_DEBUG("remote_swd_run_queue");
+	/* A transaction must be followed by another transaction or at least 8 idle cycles to
+	 * ensure that data is clocked through the AP. */
+	uint8_t x = 0;
+	send_cmd('C',&x,1);
+	remote_bitbang_putc('U');
+	remote_bitbang_putc('\n');
+	char c = remote_bitbang_rread2();
+	if (c!='s') printf("ERROR:%X",c);
+	assert (c=='s');
+	c = remote_bitbang_rread2();
+	remote_bitbang_rread2();
+
+	int retval = c-'0';
+	LOG_DEBUG("SWD queue return value: %02x", retval);
+	return retval;
+}
+
+static const struct swd_driver remote_swd = {
+	.init = remote_swd_init,
+	.switch_seq = remote_swd_switch_seq,
+	.read_reg = remote_swd_read_reg,
+	.write_reg = remote_swd_write_reg,
+	.run = remote_swd_run_queue,
+};
+#endif
+static const char * const remote_transports[] = { "jtag", "swd", NULL };
 
 struct jtag_interface remote_bitbang_interface = {
 	.name = "remote_bitbang",
-	.execute_queue = &bitbang_execute_queue,
-	.transports = jtag_only,
+	.transports = remote_transports,
 	.commands = remote_bitbang_command_handlers,
 	.init = &remote_bitbang_init,
 	.quit = &remote_bitbang_quit,
+#if NAT_SWD
+	.swd = &remote_swd,
+	.execute_queue = &remote_swd_init,
+#else
+	.swd = &bitbang_swd,
+	.execute_queue = &bitbang_execute_queue,
+#endif
 };

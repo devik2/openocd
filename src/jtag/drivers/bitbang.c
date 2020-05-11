@@ -417,13 +417,32 @@ static void bitbang_exchange(bool rnw, uint8_t buf[], unsigned int offset, unsig
 		bitbang_interface->write(0, 0, tdi);
 
 		if (rnw && buf) {
-			if (bitbang_interface->swdio_read())
+			if (bitbang_interface->swdio_read) {
+				if (bitbang_interface->swdio_read())
+					buf[bytec] |= bcval;
+				else
+					buf[bytec] &= ~bcval;
+			} else {
+				/* no swdio_read, use sample interface */
+				if (bitbang_interface->sample() != ERROR_OK) {
+					LOG_ERROR("BUG: can't sample in SWD BB");
+					exit(-1);
+				}
+			}
+		}
+
+		bitbang_interface->write(1, 0, tdi);
+	}
+
+	if (rnw && buf && !bitbang_interface->swdio_read) {
+		for (unsigned int i = offset; i < bit_cnt + offset; i++) {
+			int bytec = i/8;
+			int bcval = 1 << (i % 8);
+			if (bitbang_interface->read_sample())
 				buf[bytec] |= bcval;
 			else
 				buf[bytec] &= ~bcval;
 		}
-
-		bitbang_interface->write(1, 0, tdi);
 	}
 }
 
