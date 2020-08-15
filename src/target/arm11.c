@@ -1105,7 +1105,7 @@ static int arm11_target_create(struct target *target, Jim_Interp *interp)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
-	arm11 = calloc(1, sizeof *arm11);
+	arm11 = calloc(1, sizeof(*arm11));
 	if (!arm11)
 		return ERROR_FAIL;
 
@@ -1129,6 +1129,14 @@ static int arm11_init_target(struct command_context *cmd_ctx,
 {
 	/* Initialize anything we can set up without talking to the target */
 	return ERROR_OK;
+}
+
+static void arm11_deinit_target(struct target *target)
+{
+	struct arm11_common *arm11 = target_to_arm11(target);
+
+	arm11_dpm_deinit(arm11);
+	free(arm11);
 }
 
 /* talk to the target and set things up */
@@ -1379,5 +1387,6 @@ struct target_type arm11_target = {
 	.commands = arm11_command_handlers,
 	.target_create = arm11_target_create,
 	.init_target = arm11_init_target,
+	.deinit_target = arm11_deinit_target,
 	.examine = arm11_examine,
 };

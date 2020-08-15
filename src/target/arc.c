@@ -33,7 +33,7 @@
  * unexisting register is safe RAZ, rather then an error.
  * Note, core registers cannot be BCR.
  *
- * In arc/cpu/ tcl files all regiters are defined as core, non-BCR aux
+ * In arc/cpu/ tcl files all registers are defined as core, non-BCR aux
  * and BCR aux, in "add-reg" command they are passed to three lists
  * respectively:  core_reg_descriptions, aux_reg_descriptions,
  * bcr_reg_descriptions.
@@ -86,6 +86,26 @@ struct reg *arc_reg_get_by_name(struct reg_cache *first,
 	return NULL;
 }
 
+/**
+ * Reset internal states of caches. Must be called when entering debugging.
+ *
+ * @param target Target for which to reset caches states.
+ */
+int arc_reset_caches_states(struct target *target)
+{
+	struct arc_common *arc = target_to_arc(target);
+
+	LOG_DEBUG("Resetting internal variables of caches states");
+
+	/* Reset caches states. */
+	arc->dcache_flushed = false;
+	arc->l2cache_flushed = false;
+	arc->icache_invalidated = false;
+	arc->dcache_invalidated = false;
+	arc->l2cache_invalidated = false;
+
+	return ERROR_OK;
+}
 
 /* Initialize arc_common structure, which passes to openocd target instance */
 static int arc_init_arch_info(struct target *target, struct arc_common *arc,
@@ -101,6 +121,15 @@ static int arc_init_arch_info(struct target *target, struct arc_common *arc,
 		LOG_ERROR("ARC jtag instruction length should be equal to 4");
 		return ERROR_FAIL;
 	}
+
+	/* On most ARC targets there is a dcache, so we enable its flushing
+	 * by default. If there no dcache, there will be no error, just a slight
+	 * performance penalty from unnecessary JTAG operations. */
+	arc->has_dcache = true;
+	arc->has_icache = true;
+	/* L2$ is not available in a target by default. */
+	arc->has_l2cache = false;
+	arc_reset_caches_states(target);
 
 	/* Add standard GDB data types */
 	INIT_LIST_HEAD(&arc->reg_data_types);
@@ -218,7 +247,7 @@ static int arc_get_register(struct reg *reg)
 	reg->dirty = false;
 
 	LOG_DEBUG("Get register gdb_num=%" PRIu32 ", name=%s, value=0x%" PRIx32,
-			reg->number , desc->name, value);
+			reg->number, desc->name, value);
 
 
 	return ERROR_OK;
@@ -257,7 +286,7 @@ const struct reg_arch_type arc_reg_type = {
 	.set = arc_set_register,
 };
 
-/* GDB register groups. For now we suport only general and "empty" */
+/* GDB register groups. For now we support only general and "empty" */
 static const char * const reg_group_general = "general";
 static const char * const reg_group_other = "";
 
@@ -519,7 +548,7 @@ int arc_reg_get_field(struct target *target, const char *reg_name,
 	struct reg *reg = arc_reg_get_by_name(target->reg_cache, reg_name, true);
 
 	if (!reg) {
-		LOG_ERROR("Requested register `%s' doens't exist.", reg_name);
+		LOG_ERROR("Requested register `%s' doesn't exist.", reg_name);
 		return ERROR_ARC_REGISTER_NOT_FOUND;
 	}
 
@@ -546,7 +575,7 @@ int arc_reg_get_field(struct target *target, const char *reg_name,
 	if (!reg->valid)
 		CHECK_RETVAL(reg->type->get(reg));
 
-	/* First do endiannes-safe read of register value
+	/* First do endianness-safe read of register value
 	 * then convert it to binary buffer for further
 	 * field extraction */
 
@@ -574,6 +603,27 @@ static int arc_get_register_value(struct target *target, const char *reg_name,
 	return ERROR_OK;
 }
 
+static int arc_set_register_value(struct target *target, const char *reg_name,
+		uint32_t value)
+{
+	LOG_DEBUG("reg_name=%s value=0x%08" PRIx32, reg_name, value);
+
+	if (!(target && reg_name)) {
+		LOG_ERROR("Arguments cannot be NULL.");
+		return ERROR_FAIL;
+	}
+
+	struct reg *reg = arc_reg_get_by_name(target->reg_cache, reg_name, true);
+
+	if (!reg)
+		return ERROR_ARC_REGISTER_NOT_FOUND;
+
+	uint8_t value_buf[4];
+	buf_set_u32(value_buf, 0, 32, value);
+	CHECK_RETVAL(reg->type->set(reg, value_buf));
+
+	return ERROR_OK;
+}
 
 /* Configure DCCM's */
 static int arc_configure_dccm(struct target  *target)
@@ -855,7 +905,7 @@ static int arc_save_context(struct target *target)
 			reg->valid = true;
 			reg->dirty = false;
 			LOG_DEBUG("Get aux register regnum=%" PRIu32 ", name=%s, value=0x%08" PRIx32,
-				i , arc_reg->name, aux_values[aux_cnt]);
+				i, arc_reg->name, aux_values[aux_cnt]);
 		}
 	}
 
@@ -866,6 +916,44 @@ exit:
 	free(aux_addrs);
 
 	return retval;
+}
+
+/**
+ * Finds an actionpoint that triggered last actionpoint event, as specified by
+ * DEBUG.ASR.
+ *
+ * @param actionpoint Pointer to be set to last active actionpoint. Pointer
+ *                    will be set to NULL if DEBUG.AH is 0.
+ */
+static int get_current_actionpoint(struct target *target,
+		struct arc_actionpoint **actionpoint)
+{
+	assert(target != NULL);
+	assert(actionpoint != NULL);
+
+	uint32_t debug_ah;
+	/* Check if actionpoint caused halt */
+	CHECK_RETVAL(arc_reg_get_field(target, "debug", "ah",
+				&debug_ah));
+
+	if (debug_ah) {
+		struct arc_common *arc = target_to_arc(target);
+		unsigned int ap;
+		uint32_t debug_asr;
+		CHECK_RETVAL(arc_reg_get_field(target, "debug",
+					"asr", &debug_asr));
+
+		for (ap = 0; debug_asr > 1; debug_asr >>= 1)
+			ap += 1;
+
+		assert(ap < arc->actionpoints_num);
+
+		*actionpoint = &(arc->actionpoints_list[ap]);
+	} else {
+		*actionpoint = NULL;
+	}
+
+	return ERROR_OK;
 }
 
 static int arc_examine_debug_reason(struct target *target)
@@ -887,8 +975,20 @@ static int arc_examine_debug_reason(struct target *target)
 		/* DEBUG.BH is set if core halted due to BRK instruction.  */
 		target->debug_reason = DBG_REASON_BREAKPOINT;
 	} else {
-		/* TODO: Add Actionpoint check when AP support will be introduced*/
-		LOG_WARNING("Unknown debug reason");
+		struct arc_actionpoint *actionpoint = NULL;
+		CHECK_RETVAL(get_current_actionpoint(target, &actionpoint));
+
+		if (actionpoint != NULL) {
+			if (!actionpoint->used)
+				LOG_WARNING("Target halted by an unused actionpoint.");
+
+			if (actionpoint->type == ARC_AP_BREAKPOINT)
+				target->debug_reason = DBG_REASON_BREAKPOINT;
+			else if (actionpoint->type == ARC_AP_WATCHPOINT)
+				target->debug_reason = DBG_REASON_WATCHPOINT;
+			else
+				LOG_WARNING("Unknown type of actionpoint.");
+		}
 	}
 
 	return ERROR_OK;
@@ -900,6 +1000,7 @@ static int arc_debug_entry(struct target *target)
 
 	/* TODO: reset internal indicators of caches states, otherwise D$/I$
 	 * will not be flushed/invalidated when required. */
+	CHECK_RETVAL(arc_reset_caches_states(target));
 	CHECK_RETVAL(arc_examine_debug_reason(target));
 
 	return ERROR_OK;
@@ -928,8 +1029,10 @@ static int arc_poll(struct target *target)
 		CHECK_RETVAL(arc_get_register_value(target, "status32", &value));
 		if (value & AUX_STATUS32_REG_HALT_BIT) {
 			LOG_DEBUG("ARC core in halt or reset state.");
+			/* Save context if target was not in reset state */
+			if (target->state == TARGET_RUNNING)
+				CHECK_RETVAL(arc_debug_entry(target));
 			target->state = TARGET_HALTED;
-			CHECK_RETVAL(arc_debug_entry(target));
 			CHECK_RETVAL(target_call_event_callbacks(target, TARGET_EVENT_HALTED));
 		} else {
 		LOG_DEBUG("Discrepancy of STATUS32[0] HALT bit and ARC_JTAG_STAT_RU, "
@@ -1150,6 +1253,11 @@ static int arc_resume(struct target *target, int current, target_addr_t address,
 	LOG_DEBUG("current:%i, address:0x%08" TARGET_PRIxADDR ", handle_breakpoints(not supported yet):%i,"
 		" debug_execution:%i", current, address, handle_breakpoints, debug_execution);
 
+	/* We need to reset ARC cache variables so caches
+	 * would be invalidated and actual data
+	 * would be fetched from memory. */
+	CHECK_RETVAL(arc_reset_caches_states(target));
+
 	if (target->state != TARGET_HALTED) {
 		LOG_WARNING("target not halted");
 		return ERROR_TARGET_NOT_HALTED;
@@ -1264,6 +1372,7 @@ static void arc_deinit_target(struct target *target)
 	list_for_each_entry_safe(desc, k, &arc->bcr_reg_descriptions, list)
 		free_reg_desc(desc);
 
+	free(arc->actionpoints_list);
 	free(arc);
 }
 
@@ -1283,6 +1392,686 @@ static int arc_target_create(struct target *target, Jim_Interp *interp)
 	return ERROR_OK;
 }
 
+/**
+ * Write 4-byte instruction to memory. This is like target_write_u32, however
+ * in case of little endian ARC instructions are in middle endian format, not
+ * little endian, so different type of conversion should be done.
+ * Middle endian: instruction "aabbccdd", stored as "bbaaddcc"
+ */
+int arc_write_instruction_u32(struct target *target, uint32_t address,
+	uint32_t instr)
+{
+	uint8_t value_buf[4];
+	if (!target_was_examined(target)) {
+		LOG_ERROR("Target not examined yet");
+		return ERROR_FAIL;
+	}
+
+	LOG_DEBUG("Address: 0x%08" PRIx32 ", value: 0x%08" PRIx32, address,
+		instr);
+
+	if (target->endianness == TARGET_LITTLE_ENDIAN)
+		arc_h_u32_to_me(value_buf, instr);
+	else
+		h_u32_to_be(value_buf, instr);
+
+	CHECK_RETVAL(target_write_buffer(target, address, 4, value_buf));
+
+	return ERROR_OK;
+}
+
+/**
+ * Read 32-bit instruction from memory. It is like target_read_u32, however in
+ * case of little endian ARC instructions are in middle endian format, so
+ * different type of conversion should be done.
+ */
+int arc_read_instruction_u32(struct target *target, uint32_t address,
+		uint32_t *value)
+{
+	uint8_t value_buf[4];
+
+	if (!target_was_examined(target)) {
+		LOG_ERROR("Target not examined yet");
+		return ERROR_FAIL;
+	}
+
+	*value = 0;
+	CHECK_RETVAL(target_read_buffer(target, address, 4, value_buf));
+
+	if (target->endianness == TARGET_LITTLE_ENDIAN)
+		*value = arc_me_to_h_u32(value_buf);
+	else
+		*value = be_to_h_u32(value_buf);
+
+	LOG_DEBUG("Address: 0x%08" PRIx32 ", value: 0x%08" PRIx32, address,
+		*value);
+
+	return ERROR_OK;
+}
+
+/* Actionpoint mechanism allows to setup HW breakpoints
+ * and watchpoints. Each actionpoint is controlled by
+ * 3 aux registers: Actionpoint(AP) match mask(AP_AMM), AP match value(AP_AMV)
+ * and AP control(AC).
+ * This function is for setting/unsetting actionpoints:
+ * at - actionpoint target: trigger on mem/reg access
+ * tt - transaction type : trigger on r/w. */
+static int arc_configure_actionpoint(struct target *target, uint32_t ap_num,
+	uint32_t match_value, uint32_t control_tt, uint32_t control_at)
+{
+	struct arc_common *arc = target_to_arc(target);
+
+	if (control_tt != AP_AC_TT_DISABLE) {
+
+		if (arc->actionpoints_num_avail < 1) {
+			LOG_ERROR("No free actionpoints, maximim amount is %" PRIu32,
+					arc->actionpoints_num);
+			return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+		}
+
+		/* Names of register to set - 24 chars should be enough. Looks a little
+		 * bit out-of-place for C code, but makes it aligned to the bigger
+		 * concept of "ARC registers are defined in TCL" as far as possible.
+		 */
+		char ap_amv_reg_name[24], ap_amm_reg_name[24], ap_ac_reg_name[24];
+		snprintf(ap_amv_reg_name, 24, "ap_amv%" PRIu32, ap_num);
+		snprintf(ap_amm_reg_name, 24, "ap_amm%" PRIu32, ap_num);
+		snprintf(ap_ac_reg_name, 24, "ap_ac%" PRIu32, ap_num);
+		CHECK_RETVAL(arc_set_register_value(target, ap_amv_reg_name,
+					 match_value));
+		CHECK_RETVAL(arc_set_register_value(target, ap_amm_reg_name, 0));
+		CHECK_RETVAL(arc_set_register_value(target, ap_ac_reg_name,
+					 control_tt | control_at));
+		arc->actionpoints_num_avail--;
+	} else {
+		char ap_ac_reg_name[24];
+		snprintf(ap_ac_reg_name, 24, "ap_ac%" PRIu32, ap_num);
+		CHECK_RETVAL(arc_set_register_value(target, ap_ac_reg_name,
+					 AP_AC_TT_DISABLE));
+		arc->actionpoints_num_avail++;
+	}
+
+	return ERROR_OK;
+}
+
+static int arc_set_breakpoint(struct target *target,
+		struct breakpoint *breakpoint)
+{
+	if (breakpoint->set) {
+		LOG_WARNING("breakpoint already set");
+		return ERROR_OK;
+	}
+
+	if (breakpoint->type == BKPT_SOFT) {
+		LOG_DEBUG("bpid: %" PRIu32, breakpoint->unique_id);
+
+		if (breakpoint->length == 4) {
+			uint32_t verify = 0xffffffff;
+
+			CHECK_RETVAL(target_read_buffer(target, breakpoint->address, breakpoint->length,
+					breakpoint->orig_instr));
+
+			CHECK_RETVAL(arc_write_instruction_u32(target, breakpoint->address,
+					ARC_SDBBP_32));
+
+			CHECK_RETVAL(arc_read_instruction_u32(target, breakpoint->address, &verify));
+
+			if (verify != ARC_SDBBP_32) {
+				LOG_ERROR("Unable to set 32bit breakpoint at address @0x%" TARGET_PRIxADDR
+						" - check that memory is read/writable", breakpoint->address);
+				return ERROR_FAIL;
+			}
+		} else if (breakpoint->length == 2) {
+			uint16_t verify = 0xffff;
+
+			CHECK_RETVAL(target_read_buffer(target, breakpoint->address, breakpoint->length,
+					breakpoint->orig_instr));
+			CHECK_RETVAL(target_write_u16(target, breakpoint->address, ARC_SDBBP_16));
+
+			CHECK_RETVAL(target_read_u16(target, breakpoint->address, &verify));
+			if (verify != ARC_SDBBP_16) {
+				LOG_ERROR("Unable to set 16bit breakpoint at address @0x%" TARGET_PRIxADDR
+						" - check that memory is read/writable", breakpoint->address);
+				return ERROR_FAIL;
+			}
+		} else {
+			LOG_ERROR("Invalid breakpoint length: target supports only 2 or 4");
+			return ERROR_COMMAND_ARGUMENT_INVALID;
+		}
+
+		breakpoint->set = 64; /* Any nice value but 0 */
+	} else if (breakpoint->type == BKPT_HARD) {
+		struct arc_common *arc = target_to_arc(target);
+		struct arc_actionpoint *ap_list = arc->actionpoints_list;
+		unsigned int bp_num;
+
+		for (bp_num = 0; bp_num < arc->actionpoints_num; bp_num++) {
+			if (!ap_list[bp_num].used)
+				break;
+		}
+
+		if (bp_num >= arc->actionpoints_num) {
+			LOG_ERROR("No free actionpoints, maximum amount is %" PRIu32,
+					arc->actionpoints_num);
+			return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+		}
+
+		int retval = arc_configure_actionpoint(target, bp_num,
+				breakpoint->address, AP_AC_TT_READWRITE, AP_AC_AT_INST_ADDR);
+
+		if (retval == ERROR_OK) {
+			breakpoint->set = bp_num + 1;
+			ap_list[bp_num].used = 1;
+			ap_list[bp_num].bp_value = breakpoint->address;
+			ap_list[bp_num].type = ARC_AP_BREAKPOINT;
+
+			LOG_DEBUG("bpid: %" PRIu32 ", bp_num %u bp_value 0x%" PRIx32,
+					breakpoint->unique_id, bp_num, ap_list[bp_num].bp_value);
+		}
+
+	} else {
+		LOG_DEBUG("ERROR: setting unknown breakpoint type");
+		return ERROR_FAIL;
+	}
+
+	/* core instruction cache is now invalid. */
+	CHECK_RETVAL(arc_cache_invalidate(target));
+
+	return ERROR_OK;
+}
+
+static int arc_unset_breakpoint(struct target *target,
+		struct breakpoint *breakpoint)
+{
+	int retval = ERROR_OK;
+
+	if (!breakpoint->set) {
+		LOG_WARNING("breakpoint not set");
+		return ERROR_OK;
+	}
+
+	if (breakpoint->type == BKPT_SOFT) {
+		/* restore original instruction (kept in target endianness) */
+		LOG_DEBUG("bpid: %" PRIu32, breakpoint->unique_id);
+		if (breakpoint->length == 4) {
+			uint32_t current_instr;
+
+			/* check that user program has not modified breakpoint instruction */
+			CHECK_RETVAL(arc_read_instruction_u32(target, breakpoint->address, &current_instr));
+
+			if (current_instr == ARC_SDBBP_32) {
+				retval = target_write_buffer(target, breakpoint->address,
+					breakpoint->length, breakpoint->orig_instr);
+				if (retval != ERROR_OK)
+					return retval;
+			} else {
+				LOG_WARNING("Software breakpoint @0x%" TARGET_PRIxADDR
+					" has been overwritten outside of debugger."
+					"Expected: @0x%" PRIx32 ", got: @0x%" PRIx32,
+					breakpoint->address, ARC_SDBBP_32, current_instr);
+			}
+		} else if (breakpoint->length == 2) {
+			uint16_t current_instr;
+
+			/* check that user program has not modified breakpoint instruction */
+			CHECK_RETVAL(target_read_u16(target, breakpoint->address, &current_instr));
+			if (current_instr == ARC_SDBBP_16) {
+				retval = target_write_buffer(target, breakpoint->address,
+					breakpoint->length, breakpoint->orig_instr);
+				if (retval != ERROR_OK)
+					return retval;
+			} else {
+				LOG_WARNING("Software breakpoint @0x%" TARGET_PRIxADDR
+					" has been overwritten outside of debugger. "
+					"Expected: 0x%04x, got: 0x%04" PRIx16,
+					breakpoint->address, ARC_SDBBP_16, current_instr);
+			}
+		} else {
+			LOG_ERROR("Invalid breakpoint length: target supports only 2 or 4");
+			return ERROR_COMMAND_ARGUMENT_INVALID;
+		}
+		breakpoint->set = 0;
+
+	}	else if (breakpoint->type == BKPT_HARD) {
+		struct arc_common *arc = target_to_arc(target);
+		struct arc_actionpoint *ap_list = arc->actionpoints_list;
+		unsigned int bp_num = breakpoint->set - 1;
+
+		if ((breakpoint->set == 0) || (bp_num >= arc->actionpoints_num)) {
+			LOG_DEBUG("Invalid actionpoint ID: %u in breakpoint: %" PRIu32,
+					  bp_num, breakpoint->unique_id);
+			return ERROR_OK;
+		}
+
+		retval = arc_configure_actionpoint(target, bp_num,
+						breakpoint->address, AP_AC_TT_DISABLE, AP_AC_AT_INST_ADDR);
+
+		if (retval == ERROR_OK) {
+			breakpoint->set = 0;
+			ap_list[bp_num].used = 0;
+			ap_list[bp_num].bp_value = 0;
+
+			LOG_DEBUG("bpid: %" PRIu32 " - released actionpoint ID: %i",
+					breakpoint->unique_id, bp_num);
+		}
+	} else {
+			LOG_DEBUG("ERROR: unsetting unknown breakpoint type");
+			return ERROR_FAIL;
+	}
+
+	/* core instruction cache is now invalid. */
+	CHECK_RETVAL(arc_cache_invalidate(target));
+
+	return retval;
+}
+
+
+static int arc_add_breakpoint(struct target *target, struct breakpoint *breakpoint)
+{
+	if (target->state == TARGET_HALTED) {
+		return arc_set_breakpoint(target, breakpoint);
+
+	} else {
+		LOG_WARNING(" > core was not halted, please try again.");
+		return ERROR_TARGET_NOT_HALTED;
+	}
+}
+
+static int arc_remove_breakpoint(struct target *target,
+	struct breakpoint *breakpoint)
+{
+	if (target->state == TARGET_HALTED) {
+		if (breakpoint->set)
+			CHECK_RETVAL(arc_unset_breakpoint(target, breakpoint));
+	} else {
+		LOG_WARNING("target not halted");
+		return ERROR_TARGET_NOT_HALTED;
+	}
+
+	return ERROR_OK;
+}
+
+void arc_reset_actionpoints(struct target *target)
+{
+	struct arc_common *arc = target_to_arc(target);
+	struct arc_actionpoint *ap_list = arc->actionpoints_list;
+	struct breakpoint *next_b;
+
+	while (target->breakpoints) {
+		next_b = target->breakpoints->next;
+		arc_remove_breakpoint(target, target->breakpoints);
+		free(target->breakpoints->orig_instr);
+		free(target->breakpoints);
+		target->breakpoints = next_b;
+	}
+	for (unsigned int i = 0; i < arc->actionpoints_num; i++) {
+		if ((ap_list[i].used) && (ap_list[i].reg_address))
+			arc_remove_auxreg_actionpoint(target, ap_list[i].reg_address);
+	}
+}
+
+int arc_set_actionpoints_num(struct target *target, uint32_t ap_num)
+{
+	LOG_DEBUG("target=%s actionpoints=%" PRIu32, target_name(target), ap_num);
+	struct arc_common *arc = target_to_arc(target);
+
+	/* Make sure that there are no enabled actionpoints in target. */
+	arc_reset_actionpoints(target);
+
+	/* Assume that all points have been removed from target.  */
+	free(arc->actionpoints_list);
+
+	arc->actionpoints_num_avail = ap_num;
+	arc->actionpoints_num = ap_num;
+	/* calloc can be safely called when ncount == 0.  */
+	arc->actionpoints_list = calloc(ap_num, sizeof(struct arc_actionpoint));
+
+	if (!arc->actionpoints_list) {
+		LOG_ERROR("Unable to allocate memory");
+		return ERROR_FAIL;
+	}
+	return ERROR_OK;
+}
+
+
+int arc_add_auxreg_actionpoint(struct target *target,
+	uint32_t auxreg_addr, uint32_t transaction)
+{
+	unsigned int ap_num = 0;
+	int retval = ERROR_OK;
+
+	if (target->state != TARGET_HALTED)
+		return ERROR_TARGET_NOT_HALTED;
+
+	struct arc_common *arc = target_to_arc(target);
+	struct arc_actionpoint *ap_list = arc->actionpoints_list;
+
+	while (ap_list[ap_num].used)
+		ap_num++;
+
+	if (ap_num >= arc->actionpoints_num) {
+		LOG_ERROR("No actionpoint free, maximum amount is %u",
+				arc->actionpoints_num);
+		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+	}
+
+	retval =  arc_configure_actionpoint(target, ap_num,
+			auxreg_addr, transaction, AP_AC_AT_AUXREG_ADDR);
+
+	if (retval == ERROR_OK) {
+		ap_list[ap_num].used = 1;
+		ap_list[ap_num].reg_address = auxreg_addr;
+	}
+
+	return retval;
+}
+
+int arc_remove_auxreg_actionpoint(struct target *target, uint32_t auxreg_addr)
+{
+	int retval = ERROR_OK;
+	bool ap_found = false;
+	unsigned int ap_num = 0;
+
+	if (target->state != TARGET_HALTED)
+		return ERROR_TARGET_NOT_HALTED;
+
+	struct arc_common *arc = target_to_arc(target);
+	struct arc_actionpoint *ap_list = arc->actionpoints_list;
+
+	while ((ap_list[ap_num].used) && (ap_num < arc->actionpoints_num)) {
+		if (ap_list[ap_num].reg_address == auxreg_addr) {
+			ap_found = true;
+			break;
+		}
+		ap_num++;
+	}
+
+	if (ap_found) {
+		retval =  arc_configure_actionpoint(target, ap_num,
+				auxreg_addr, AP_AC_TT_DISABLE, AP_AC_AT_AUXREG_ADDR);
+
+		if (retval == ERROR_OK) {
+			ap_list[ap_num].used = 0;
+			ap_list[ap_num].bp_value = 0;
+		}
+	} else {
+		LOG_ERROR("Register actionpoint not found");
+	}
+	return retval;
+}
+
+/* Helper function which switches core to single_step mode by
+ * doing aux r/w operations.  */
+int arc_config_step(struct target *target, int enable_step)
+{
+	uint32_t value;
+
+	struct arc_common *arc = target_to_arc(target);
+
+	/* enable core debug step mode */
+	if (enable_step) {
+		CHECK_RETVAL(arc_jtag_read_aux_reg_one(&arc->jtag_info, AUX_STATUS32_REG,
+			&value));
+		value &= ~SET_CORE_AE_BIT; /* clear the AE bit */
+		CHECK_RETVAL(arc_jtag_write_aux_reg_one(&arc->jtag_info, AUX_STATUS32_REG,
+			value));
+		LOG_DEBUG(" [status32:0x%08" PRIx32 "]", value);
+
+		/* Doing read-modify-write, because DEBUG might contain manually set
+		 * bits like UB or ED, which should be preserved.  */
+		CHECK_RETVAL(arc_jtag_read_aux_reg_one(&arc->jtag_info,
+					AUX_DEBUG_REG, &value));
+		value |= SET_CORE_SINGLE_INSTR_STEP; /* set the IS bit */
+		CHECK_RETVAL(arc_jtag_write_aux_reg_one(&arc->jtag_info, AUX_DEBUG_REG,
+			value));
+		LOG_DEBUG("core debug step mode enabled [debug-reg:0x%08" PRIx32 "]", value);
+
+	} else {	/* disable core debug step mode */
+		CHECK_RETVAL(arc_jtag_read_aux_reg_one(&arc->jtag_info, AUX_DEBUG_REG,
+			&value));
+		value &= ~SET_CORE_SINGLE_INSTR_STEP; /* clear the IS bit */
+		CHECK_RETVAL(arc_jtag_write_aux_reg_one(&arc->jtag_info, AUX_DEBUG_REG,
+			value));
+		LOG_DEBUG("core debug step mode disabled");
+	}
+
+	return ERROR_OK;
+}
+
+int arc_step(struct target *target, int current, target_addr_t address,
+	int handle_breakpoints)
+{
+	/* get pointers to arch-specific information */
+	struct arc_common *arc = target_to_arc(target);
+	struct breakpoint *breakpoint = NULL;
+	struct reg *pc = &(arc->core_and_aux_cache->reg_list[arc->pc_index_in_cache]);
+
+	if (target->state != TARGET_HALTED) {
+		LOG_WARNING("target not halted");
+		return ERROR_TARGET_NOT_HALTED;
+	}
+
+	/* current = 1: continue on current pc, otherwise continue at <address> */
+	if (!current) {
+		buf_set_u32(pc->value, 0, 32, address);
+		pc->dirty = 1;
+		pc->valid = 1;
+	}
+
+	LOG_DEBUG("Target steps one instruction from PC=0x%" PRIx32,
+		buf_get_u32(pc->value, 0, 32));
+
+	/* the front-end may request us not to handle breakpoints */
+	if (handle_breakpoints) {
+		breakpoint = breakpoint_find(target, buf_get_u32(pc->value, 0, 32));
+		if (breakpoint)
+			CHECK_RETVAL(arc_unset_breakpoint(target, breakpoint));
+	}
+
+	/* restore context */
+	CHECK_RETVAL(arc_restore_context(target));
+
+	target->debug_reason = DBG_REASON_SINGLESTEP;
+
+	CHECK_RETVAL(target_call_event_callbacks(target, TARGET_EVENT_RESUMED));
+
+	/* disable interrupts while stepping */
+	CHECK_RETVAL(arc_enable_interrupts(target, 0));
+
+	/* do a single step */
+	CHECK_RETVAL(arc_config_step(target, 1));
+
+	/* make sure we done our step */
+	alive_sleep(1);
+
+	/* registers are now invalid */
+	register_cache_invalidate(arc->core_and_aux_cache);
+
+	if (breakpoint)
+		CHECK_RETVAL(arc_set_breakpoint(target, breakpoint));
+
+	LOG_DEBUG("target stepped ");
+
+	target->state = TARGET_HALTED;
+
+	/* Saving context */
+	CHECK_RETVAL(arc_debug_entry(target));
+	CHECK_RETVAL(target_call_event_callbacks(target, TARGET_EVENT_HALTED));
+
+	return ERROR_OK;
+}
+
+
+/* This function invalidates icache. */
+static int arc_icache_invalidate(struct target *target)
+{
+	uint32_t value;
+
+	struct arc_common *arc = target_to_arc(target);
+
+	/* Don't waste time if already done. */
+	if (!arc->has_icache || arc->icache_invalidated)
+	    return ERROR_OK;
+
+	LOG_DEBUG("Invalidating I$.");
+
+	value = IC_IVIC_INVALIDATE;	/* invalidate I$ */
+	CHECK_RETVAL(arc_jtag_write_aux_reg_one(&arc->jtag_info, AUX_IC_IVIC_REG, value));
+
+	arc->icache_invalidated = true;
+
+	return ERROR_OK;
+}
+
+/* This function invalidates dcache */
+static int arc_dcache_invalidate(struct target *target)
+{
+	uint32_t value, dc_ctrl_value;
+
+	struct arc_common *arc = target_to_arc(target);
+
+	if (!arc->has_dcache || arc->dcache_invalidated)
+	    return ERROR_OK;
+
+	LOG_DEBUG("Invalidating D$.");
+
+	CHECK_RETVAL(arc_jtag_read_aux_reg_one(&arc->jtag_info, AUX_DC_CTRL_REG, &value));
+	dc_ctrl_value = value;
+	value &= ~DC_CTRL_IM;
+
+	/* set DC_CTRL invalidate mode to invalidate-only (no flushing!!) */
+	CHECK_RETVAL(arc_jtag_write_aux_reg_one(&arc->jtag_info, AUX_DC_CTRL_REG, value));
+	value = DC_IVDC_INVALIDATE;	/* invalidate D$ */
+	CHECK_RETVAL(arc_jtag_write_aux_reg_one(&arc->jtag_info, AUX_DC_IVDC_REG, value));
+
+	/* restore DC_CTRL invalidate mode */
+	CHECK_RETVAL(arc_jtag_write_aux_reg_one(&arc->jtag_info, AUX_DC_CTRL_REG, dc_ctrl_value));
+
+	arc->dcache_invalidated = true;
+
+	return ERROR_OK;
+}
+
+/* This function invalidates l2 cache. */
+static int arc_l2cache_invalidate(struct target *target)
+{
+	uint32_t value, slc_ctrl_value;
+
+	struct arc_common *arc = target_to_arc(target);
+
+	if (!arc->has_l2cache || arc->l2cache_invalidated)
+	    return ERROR_OK;
+
+	LOG_DEBUG("Invalidating L2$.");
+
+	CHECK_RETVAL(arc_jtag_read_aux_reg_one(&arc->jtag_info, SLC_AUX_CACHE_CTRL, &value));
+	slc_ctrl_value = value;
+	value &= ~L2_CTRL_IM;
+
+	/* set L2_CTRL invalidate mode to invalidate-only (no flushing!!) */
+	CHECK_RETVAL(arc_jtag_write_aux_reg_one(&arc->jtag_info, SLC_AUX_CACHE_CTRL, value));
+	/* invalidate L2$ */
+	CHECK_RETVAL(arc_jtag_write_aux_reg_one(&arc->jtag_info, SLC_AUX_CACHE_INV, L2_INV_IV));
+
+	/* Wait until invalidate operation ends */
+	do {
+	    LOG_DEBUG("Waiting for invalidation end.");
+	    CHECK_RETVAL(arc_jtag_read_aux_reg_one(&arc->jtag_info, SLC_AUX_CACHE_CTRL, &value));
+	} while (value & L2_CTRL_BS);
+
+	/* restore L2_CTRL invalidate mode */
+	CHECK_RETVAL(arc_jtag_write_aux_reg_one(&arc->jtag_info, SLC_AUX_CACHE_CTRL, slc_ctrl_value));
+
+	arc->l2cache_invalidated = true;
+
+	return ERROR_OK;
+}
+
+
+int arc_cache_invalidate(struct target *target)
+{
+	CHECK_RETVAL(arc_icache_invalidate(target));
+	CHECK_RETVAL(arc_dcache_invalidate(target));
+	CHECK_RETVAL(arc_l2cache_invalidate(target));
+
+	return ERROR_OK;
+}
+
+/* Flush data cache. This function is cheap to call and return quickly if D$
+ * already has been flushed since target had been halted. JTAG debugger reads
+ * values directly from memory, bypassing cache, so if there are unflushed
+ * lines debugger will read invalid values, which will cause a lot of troubles.
+ * */
+int arc_dcache_flush(struct target *target)
+{
+	uint32_t value, dc_ctrl_value;
+	bool has_to_set_dc_ctrl_im;
+
+	struct arc_common *arc = target_to_arc(target);
+
+	/* Don't waste time if already done. */
+	if (!arc->has_dcache || arc->dcache_flushed)
+	    return ERROR_OK;
+
+	LOG_DEBUG("Flushing D$.");
+
+	/* Store current value of DC_CTRL */
+	CHECK_RETVAL(arc_jtag_read_aux_reg_one(&arc->jtag_info, AUX_DC_CTRL_REG, &dc_ctrl_value));
+
+	/* Set DC_CTRL invalidate mode to flush (if not already set) */
+	has_to_set_dc_ctrl_im = (dc_ctrl_value & DC_CTRL_IM) == 0;
+	if (has_to_set_dc_ctrl_im) {
+		value = dc_ctrl_value | DC_CTRL_IM;
+		CHECK_RETVAL(arc_jtag_write_aux_reg_one(&arc->jtag_info, AUX_DC_CTRL_REG, value));
+	}
+
+	/* Flush D$ */
+	value = DC_IVDC_INVALIDATE;
+	CHECK_RETVAL(arc_jtag_write_aux_reg_one(&arc->jtag_info, AUX_DC_IVDC_REG, value));
+
+	/* Restore DC_CTRL invalidate mode (even of flush failed) */
+	if (has_to_set_dc_ctrl_im)
+	    CHECK_RETVAL(arc_jtag_write_aux_reg_one(&arc->jtag_info, AUX_DC_CTRL_REG, dc_ctrl_value));
+
+	arc->dcache_flushed = true;
+
+	return ERROR_OK;
+}
+
+/* This function flushes l2cache. */
+static int arc_l2cache_flush(struct target *target)
+{
+	uint32_t value;
+
+	struct arc_common *arc = target_to_arc(target);
+
+	/* Don't waste time if already done. */
+	if (!arc->has_l2cache || arc->l2cache_flushed)
+	    return ERROR_OK;
+
+	LOG_DEBUG("Flushing L2$.");
+
+	/* Flush L2 cache */
+	CHECK_RETVAL(arc_jtag_write_aux_reg_one(&arc->jtag_info, SLC_AUX_CACHE_FLUSH, L2_FLUSH_FL));
+
+	/* Wait until flush operation ends */
+	do {
+	    LOG_DEBUG("Waiting for flushing end.");
+	    CHECK_RETVAL(arc_jtag_read_aux_reg_one(&arc->jtag_info, SLC_AUX_CACHE_CTRL, &value));
+	} while (value & L2_CTRL_BS);
+
+	arc->l2cache_flushed = true;
+
+	return ERROR_OK;
+}
+
+int arc_cache_flush(struct target *target)
+{
+	CHECK_RETVAL(arc_dcache_flush(target));
+	CHECK_RETVAL(arc_l2cache_flush(target));
+
+	return ERROR_OK;
+}
 
 /* ARC v2 target */
 struct target_type arcv2_target = {
@@ -1292,13 +2081,13 @@ struct target_type arcv2_target = {
 
 	.arch_state = arc_arch_state,
 
-	/* TODO That seems like something similiar to metaware hostlink, so perhaps
+	/* TODO That seems like something similar to metaware hostlink, so perhaps
 	 * we can exploit this in the future. */
 	.target_request_data = NULL,
 
 	.halt = arc_halt,
 	.resume = arc_resume,
-	.step = NULL,
+	.step = arc_step,
 
 	.assert_reset = arc_assert_reset,
 	.deassert_reset = arc_deassert_reset,
@@ -1313,10 +2102,10 @@ struct target_type arcv2_target = {
 	.checksum_memory = NULL,
 	.blank_check_memory = NULL,
 
-	.add_breakpoint = NULL,
+	.add_breakpoint = arc_add_breakpoint,
 	.add_context_breakpoint = NULL,
 	.add_hybrid_breakpoint = NULL,
-	.remove_breakpoint = NULL,
+	.remove_breakpoint = arc_remove_breakpoint,
 	.add_watchpoint = NULL,
 	.remove_watchpoint = NULL,
 	.hit_watchpoint = NULL,

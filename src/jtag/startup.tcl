@@ -115,7 +115,7 @@ proc jtag_ntrst_assert_width args {
 
 # BEGIN MIGRATION AIDS ...  these adapter operations originally had
 # JTAG-specific names despite the fact that the operations were not
-# specific to JTAG, or otherewise had troublesome/misleading names.
+# specific to JTAG, or otherwise had troublesome/misleading names.
 #
 # FIXME phase these aids out after about April 2011
 #
@@ -214,6 +214,16 @@ proc  interface_list args {
 proc ftdi_location args {
 	echo "DEPRECATED! use 'adapter usb location' not 'ftdi_location'"
 	eval adapter usb location $args
+}
+
+proc xds110_serial args {
+	echo "DEPRECATED! use 'xds110 serial' not 'xds110_serial'"
+	eval xds110 serial $args
+}
+
+proc xds110_supply_voltage args {
+	echo "DEPRECATED! use 'xds110 supply' not 'xds110_supply_voltage'"
+	eval xds110 supply $args
 }
 
 # END MIGRATION AIDS

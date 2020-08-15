@@ -358,7 +358,7 @@ static int kitprog_get_version(void)
 	unsigned char command[3] = {HID_TYPE_START | HID_TYPE_WRITE, 0x00, HID_COMMAND_VERSION};
 	unsigned char data[64];
 
-	ret = kitprog_hid_command(command, sizeof command, data, sizeof data);
+	ret = kitprog_hid_command(command, sizeof(command), data, sizeof(data));
 	if (ret != ERROR_OK)
 		return ret;
 
@@ -376,7 +376,7 @@ static int kitprog_get_millivolts(void)
 	unsigned char command[3] = {HID_TYPE_START | HID_TYPE_READ, 0x00, HID_COMMAND_POWER};
 	unsigned char data[64];
 
-	ret = kitprog_hid_command(command, sizeof command, data, sizeof data);
+	ret = kitprog_hid_command(command, sizeof(command), data, sizeof(data));
 	if (ret != ERROR_OK)
 		return ret;
 
@@ -603,10 +603,10 @@ static int kitprog_generic_acquire(void)
 	 * will take the Cortex-M3 out of reset and enable debugging.
 	 */
 	for (int i = 0; i < 2; i++) {
-		for (uint8_t j = 0; j < sizeof devices && acquire_count == i; j++) {
+		for (uint8_t j = 0; j < sizeof(devices) && acquire_count == i; j++) {
 			retval = kitprog_acquire_psoc(devices[j], ACQUIRE_MODE_RESET, 3);
 			if (retval != ERROR_OK) {
-				LOG_DEBUG("Aquisition function failed for device 0x%02x.", devices[j]);
+				LOG_DEBUG("Acquisition function failed for device 0x%02x.", devices[j]);
 				return retval;
 			}
 
@@ -746,7 +746,7 @@ static int kitprog_swd_run_queue(void)
 		 * size (64 bytes) as required by the USB specification.
 		 * Therefore libusb would wait for continuation of transmission.
 		 * Workaround: Limit bulk read size to expected number of bytes
-		 * for problematic tranfer sizes. Otherwise use the maximum buffer
+		 * for problematic transfer sizes. Otherwise use the maximum buffer
 		 * size here because the KitProg sometimes doesn't like bulk reads
 		 * of fewer than 62 bytes. (?!?!)
 		 */

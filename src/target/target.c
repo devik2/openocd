@@ -148,10 +148,8 @@ static struct target_type *target_types[] = {
 	&mem_ap_target,
 	&esirisc_target,
 	&arcv2_target,
-#if BUILD_TARGET64
 	&aarch64_target,
 	&mips_mips64_target,
-#endif
 	NULL,
 };
 
@@ -178,10 +176,10 @@ static const Jim_Nvp nvp_error_target[] = {
 	{ .value = ERROR_TARGET_TIMEOUT, .name = "err-timeout" },
 	{ .value = ERROR_TARGET_NOT_HALTED, .name = "err-not-halted" },
 	{ .value = ERROR_TARGET_FAILURE, .name = "err-failure" },
-	{ .value = ERROR_TARGET_UNALIGNED_ACCESS   , .name = "err-unaligned-access" },
-	{ .value = ERROR_TARGET_DATA_ABORT , .name = "err-data-abort" },
-	{ .value = ERROR_TARGET_RESOURCE_NOT_AVAILABLE , .name = "err-resource-not-available" },
-	{ .value = ERROR_TARGET_TRANSLATION_FAULT  , .name = "err-translation-fault" },
+	{ .value = ERROR_TARGET_UNALIGNED_ACCESS, .name = "err-unaligned-access" },
+	{ .value = ERROR_TARGET_DATA_ABORT, .name = "err-data-abort" },
+	{ .value = ERROR_TARGET_RESOURCE_NOT_AVAILABLE, .name = "err-resource-not-available" },
+	{ .value = ERROR_TARGET_TRANSLATION_FAULT, .name = "err-translation-fault" },
 	{ .value = ERROR_TARGET_NOT_RUNNING, .name = "err-not-running" },
 	{ .value = ERROR_TARGET_NOT_EXAMINED, .name = "err-not-examined" },
 	{ .value = -1, .name = NULL }
@@ -205,6 +203,8 @@ static const Jim_Nvp nvp_target_event[] = {
 	{ .value = TARGET_EVENT_RESUMED, .name = "resumed" },
 	{ .value = TARGET_EVENT_RESUME_START, .name = "resume-start" },
 	{ .value = TARGET_EVENT_RESUME_END, .name = "resume-end" },
+	{ .value = TARGET_EVENT_STEP_START, .name = "step-start" },
+	{ .value = TARGET_EVENT_STEP_END, .name = "step-end" },
 
 	{ .name = "gdb-start", .value = TARGET_EVENT_GDB_START },
 	{ .name = "gdb-end", .value = TARGET_EVENT_GDB_END },
@@ -229,10 +229,10 @@ static const Jim_Nvp nvp_target_event[] = {
 	{ .value = TARGET_EVENT_GDB_DETACH, .name = "gdb-detach" },
 
 	{ .value = TARGET_EVENT_GDB_FLASH_WRITE_START, .name = "gdb-flash-write-start" },
-	{ .value = TARGET_EVENT_GDB_FLASH_WRITE_END  , .name = "gdb-flash-write-end"   },
+	{ .value = TARGET_EVENT_GDB_FLASH_WRITE_END,   .name = "gdb-flash-write-end"   },
 
 	{ .value = TARGET_EVENT_GDB_FLASH_ERASE_START, .name = "gdb-flash-erase-start" },
-	{ .value = TARGET_EVENT_GDB_FLASH_ERASE_END  , .name = "gdb-flash-erase-end" },
+	{ .value = TARGET_EVENT_GDB_FLASH_ERASE_END,   .name = "gdb-flash-erase-end" },
 
 	{ .value = TARGET_EVENT_TRACE_CONFIG, .name = "trace-config" },
 
@@ -249,15 +249,15 @@ static const Jim_Nvp nvp_target_state[] = {
 };
 
 static const Jim_Nvp nvp_target_debug_reason[] = {
-	{ .name = "debug-request"            , .value = DBG_REASON_DBGRQ },
-	{ .name = "breakpoint"               , .value = DBG_REASON_BREAKPOINT },
-	{ .name = "watchpoint"               , .value = DBG_REASON_WATCHPOINT },
+	{ .name = "debug-request",             .value = DBG_REASON_DBGRQ },
+	{ .name = "breakpoint",                .value = DBG_REASON_BREAKPOINT },
+	{ .name = "watchpoint",                .value = DBG_REASON_WATCHPOINT },
 	{ .name = "watchpoint-and-breakpoint", .value = DBG_REASON_WPTANDBKPT },
-	{ .name = "single-step"              , .value = DBG_REASON_SINGLESTEP },
-	{ .name = "target-not-halted"        , .value = DBG_REASON_NOTHALTED  },
-	{ .name = "program-exit"             , .value = DBG_REASON_EXIT },
-	{ .name = "exception-catch"          , .value = DBG_REASON_EXC_CATCH },
-	{ .name = "undefined"                , .value = DBG_REASON_UNDEFINED },
+	{ .name = "single-step",               .value = DBG_REASON_SINGLESTEP },
+	{ .name = "target-not-halted",         .value = DBG_REASON_NOTHALTED  },
+	{ .name = "program-exit",              .value = DBG_REASON_EXIT },
+	{ .name = "exception-catch",           .value = DBG_REASON_EXC_CATCH },
+	{ .name = "undefined",                 .value = DBG_REASON_UNDEFINED },
 	{ .name = NULL, .value = -1 },
 };
 
@@ -271,10 +271,10 @@ static const Jim_Nvp nvp_target_endian[] = {
 
 static const Jim_Nvp nvp_reset_modes[] = {
 	{ .name = "unknown", .value = RESET_UNKNOWN },
-	{ .name = "run"    , .value = RESET_RUN },
-	{ .name = "halt"   , .value = RESET_HALT },
-	{ .name = "init"   , .value = RESET_INIT },
-	{ .name = NULL     , .value = -1 },
+	{ .name = "run",     .value = RESET_RUN },
+	{ .name = "halt",    .value = RESET_HALT },
+	{ .name = "init",    .value = RESET_INIT },
+	{ .name = NULL,      .value = -1 },
 };
 
 const char *debug_reason_name(struct target *t)
@@ -342,6 +342,15 @@ static int new_target_number(void)
 		t = t->next;
 	}
 	return x + 1;
+}
+
+static void append_to_list_all_targets(struct target *target)
+{
+	struct target **t = &all_targets;
+
+	while (*t)
+		t = &((*t)->next);
+	*t = target;
 }
 
 /* read a uint64_t from a buffer in target memory endianness */
@@ -593,7 +602,7 @@ int target_halt(struct target *target)
  * @param address Optionally used as the program counter.
  * @param handle_breakpoints True iff breakpoints at the resumption PC
  *	should be skipped.  (For example, maybe execution was stopped by
- *	such a breakpoint, in which case it would be counterprodutive to
+ *	such a breakpoint, in which case it would be counterproductive to
  *	let it re-trigger.
  * @param debug_execution False if all working areas allocated by OpenOCD
  *	should be released and/or restored to their original contents.
@@ -709,7 +718,7 @@ static int default_check_reset(struct target *target)
 	return ERROR_OK;
 }
 
-/* Equvivalent Tcl code arp_examine_one is in src/target/startup.tcl
+/* Equivalent Tcl code arp_examine_one is in src/target/startup.tcl
  * Keep in sync */
 int target_examine_one(struct target *target)
 {
@@ -1224,8 +1233,17 @@ int target_get_gdb_reg_list(struct target *target,
 		struct reg **reg_list[], int *reg_list_size,
 		enum target_register_class reg_class)
 {
-	int result = target->type->get_gdb_reg_list(target, reg_list,
+	int result = ERROR_FAIL;
+
+	if (!target_was_examined(target)) {
+		LOG_ERROR("Target not examined yet");
+		goto done;
+	}
+
+	result = target->type->get_gdb_reg_list(target, reg_list,
 			reg_list_size, reg_class);
+
+done:
 	if (result != ERROR_OK) {
 		*reg_list = NULL;
 		*reg_list_size = 0;
@@ -1256,7 +1274,17 @@ bool target_supports_gdb_connection(struct target *target)
 int target_step(struct target *target,
 		int current, target_addr_t address, int handle_breakpoints)
 {
-	return target->type->step(target, current, address, handle_breakpoints);
+	int retval;
+
+	target_call_event_callbacks(target, TARGET_EVENT_STEP_START);
+
+	retval = target->type->step(target, current, address, handle_breakpoints);
+	if (retval != ERROR_OK)
+		return retval;
+
+	target_call_event_callbacks(target, TARGET_EVENT_STEP_END);
+
+	return retval;
 }
 
 int target_get_gdb_fileio_info(struct target *target, struct gdb_fileio_info *fileio_info)
@@ -2882,7 +2910,7 @@ COMMAND_HANDLER(handle_reg_command)
 				} else {
 					command_print(CMD, "(%i) %s (/%" PRIu32 ")",
 							  count, reg->name,
-							  reg->size) ;
+							  reg->size);
 				}
 			}
 			cache = cache->next;
@@ -3145,7 +3173,7 @@ COMMAND_HANDLER(handle_step_command)
 
 	struct target *target = get_current_target(CMD_CTX);
 
-	return target->type->step(target, current_pc, addr, 1);
+	return target_step(target, current_pc, addr, 1);
 }
 
 void target_handle_md_output(struct command_invocation *cmd,
@@ -3452,7 +3480,7 @@ COMMAND_HANDLER(handle_load_image_command)
 		uint32_t offset = 0;
 		uint32_t length = buf_cnt;
 
-		/* DANGER!!! beware of unsigned comparision here!!! */
+		/* DANGER!!! beware of unsigned comparison here!!! */
 
 		if ((image.sections[i].base_address + buf_cnt >= min_address) &&
 				(image.sections[i].base_address < max_address)) {
@@ -3829,11 +3857,16 @@ COMMAND_HANDLER(handle_rbp_command)
 	if (CMD_ARGC != 1)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
-	target_addr_t addr;
-	COMMAND_PARSE_ADDRESS(CMD_ARGV[0], addr);
-
 	struct target *target = get_current_target(CMD_CTX);
-	breakpoint_remove(target, addr);
+
+	if (!strcmp(CMD_ARGV[0], "all")) {
+		breakpoint_remove_all(target);
+	} else {
+		target_addr_t addr;
+		COMMAND_PARSE_ADDRESS(CMD_ARGV[0], addr);
+
+		breakpoint_remove(target, addr);
+	}
 
 	return ERROR_OK;
 }
@@ -4567,7 +4600,13 @@ void target_handle_event(struct target *target, enum target_event e)
 			struct command_context *cmd_ctx = current_command_context(teap->interp);
 			struct target *saved_target_override = cmd_ctx->current_target_override;
 			cmd_ctx->current_target_override = target;
+
 			retval = Jim_EvalObj(teap->interp, teap->body);
+
+			cmd_ctx->current_target_override = saved_target_override;
+
+			if (retval == ERROR_COMMAND_CLOSE_CONNECTION)
+				return;
 
 			if (retval == JIM_RETURN)
 				retval = teap->interp->returnCode;
@@ -4581,8 +4620,6 @@ void target_handle_event(struct target *target, enum target_event e)
 				/* clean both error code and stacktrace before return */
 				Jim_Eval(teap->interp, "error \"\" \"\"");
 			}
-
-			cmd_ctx->current_target_override = saved_target_override;
 		}
 	}
 }
@@ -4624,7 +4661,7 @@ static Jim_Nvp nvp_config_opts[] = {
 	{ .name = "-work-area-phys",   .value = TCFG_WORK_AREA_PHYS },
 	{ .name = "-work-area-size",   .value = TCFG_WORK_AREA_SIZE },
 	{ .name = "-work-area-backup", .value = TCFG_WORK_AREA_BACKUP },
-	{ .name = "-endian" ,          .value = TCFG_ENDIAN },
+	{ .name = "-endian",           .value = TCFG_ENDIAN },
 	{ .name = "-coreid",           .value = TCFG_COREID },
 	{ .name = "-chain-position",   .value = TCFG_CHAIN_POSITION },
 	{ .name = "-dbgbase",          .value = TCFG_DBGBASE },
@@ -4667,7 +4704,7 @@ static int target_configure(Jim_GetOptInfo *goi, struct target *target)
 		}
 		switch (n->value) {
 		case TCFG_TYPE:
-			/* not setable */
+			/* not settable */
 			if (goi->isconfigure) {
 				Jim_SetResultFormatted(goi->interp,
 						"not settable: %s", n->name);
@@ -4996,7 +5033,7 @@ static int jim_target_examine(Jim_Interp *interp, int argc, Jim_Obj *const *argv
 	if (goi.argc > 0 &&
 	    strcmp(Jim_GetString(argv[1], NULL), "allow-defer") == 0) {
 		/* consume it */
-		struct Jim_Obj *obj;
+		Jim_Obj *obj;
 		int e = Jim_GetOpt_Obj(&goi, &obj);
 		if (e != JIM_OK)
 			return e;
@@ -5459,12 +5496,21 @@ static int target_create(Jim_GetOptInfo *goi)
 
 	/* Create it */
 	target = calloc(1, sizeof(struct target));
+	if (!target) {
+		LOG_ERROR("Out of memory");
+		return JIM_ERR;
+	}
+
 	/* set target number */
 	target->target_number = new_target_number();
-	cmd_ctx->current_target = target;
 
 	/* allocate memory for each unique target type */
-	target->type = calloc(1, sizeof(struct target_type));
+	target->type = malloc(sizeof(struct target_type));
+	if (!target->type) {
+		LOG_ERROR("Out of memory");
+		free(target);
+		return JIM_ERR;
+	}
 
 	memcpy(target->type, target_types[x], sizeof(struct target_type));
 
@@ -5493,6 +5539,12 @@ static int target_create(Jim_GetOptInfo *goi)
 
 	/* initialize trace information */
 	target->trace_info = calloc(1, sizeof(struct trace));
+	if (!target->trace_info) {
+		LOG_ERROR("Out of memory");
+		free(target->type);
+		free(target);
+		return JIM_ERR;
+	}
 
 	target->dbgmsg          = NULL;
 	target->dbg_msg_enabled = 0;
@@ -5526,7 +5578,9 @@ static int target_create(Jim_GetOptInfo *goi)
 	}
 
 	if (e != JIM_OK) {
+		rtos_destroy(target);
 		free(target->gdb_port_override);
+		free(target->trace_info);
 		free(target->type);
 		free(target);
 		return e;
@@ -5539,14 +5593,25 @@ static int target_create(Jim_GetOptInfo *goi)
 
 	cp = Jim_GetString(new_cmd, NULL);
 	target->cmd_name = strdup(cp);
+	if (!target->cmd_name) {
+		LOG_ERROR("Out of memory");
+		rtos_destroy(target);
+		free(target->gdb_port_override);
+		free(target->trace_info);
+		free(target->type);
+		free(target);
+		return JIM_ERR;
+	}
 
 	if (target->type->target_create) {
 		e = (*(target->type->target_create))(target, goi->interp);
 		if (e != ERROR_OK) {
 			LOG_DEBUG("target_create failed");
-			free(target->gdb_port_override);
-			free(target->type);
 			free(target->cmd_name);
+			rtos_destroy(target);
+			free(target->gdb_port_override);
+			free(target->trace_info);
+			free(target->type);
 			free(target);
 			return JIM_ERR;
 		}
@@ -5557,15 +5622,6 @@ static int target_create(Jim_GetOptInfo *goi)
 		e = register_commands(cmd_ctx, NULL, target->type->commands);
 		if (ERROR_OK != e)
 			LOG_ERROR("unable to register '%s' commands", cp);
-	}
-
-	/* append to end of list */
-	{
-		struct target **tpp;
-		tpp = &(all_targets);
-		while (*tpp)
-			tpp = &((*tpp)->next);
-		*tpp = target;
 	}
 
 	/* now - create the new target name command */
@@ -5589,14 +5645,27 @@ static int target_create(Jim_GetOptInfo *goi)
 		COMMAND_REGISTRATION_DONE
 	};
 	e = register_commands(cmd_ctx, NULL, target_commands);
-	if (ERROR_OK != e)
+	if (e != ERROR_OK) {
+		if (target->type->deinit_target)
+			target->type->deinit_target(target);
+		free(target->cmd_name);
+		rtos_destroy(target);
+		free(target->gdb_port_override);
+		free(target->trace_info);
+		free(target->type);
+		free(target);
 		return JIM_ERR;
+	}
 
 	struct command *c = command_find_in_context(cmd_ctx, cp);
 	assert(c);
 	command_set_handler_data(c, target);
 
-	return (ERROR_OK == e) ? JIM_OK : JIM_ERR;
+	/* append to end of list */
+	append_to_list_all_targets(target);
+
+	cmd_ctx->current_target = target;
+	return JIM_OK;
 }
 
 static int jim_target_current(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
@@ -5655,7 +5724,7 @@ static int jim_target_smp(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 	retval = 0;
 	LOG_DEBUG("%d", argc);
 	/* argv[1] = target to associate in smp
-	 * argv[2] = target to assoicate in smp
+	 * argv[2] = target to associate in smp
 	 * argv[3] ...
 	 */
 
@@ -5825,7 +5894,7 @@ COMMAND_HANDLER(handle_fast_load_image_command)
 		uint32_t offset = 0;
 		uint32_t length = buf_cnt;
 
-		/* DANGER!!! beware of unsigned comparision here!!! */
+		/* DANGER!!! beware of unsigned comparison here!!! */
 
 		if ((image.sections[i].base_address + buf_cnt >= min_address) &&
 				(image.sections[i].base_address < max_address)) {
@@ -6217,7 +6286,7 @@ static const struct command_registration target_exec_command_handlers[] = {
 		.name = "halt",
 		.handler = handle_halt_command,
 		.mode = COMMAND_EXEC,
-		.help = "request target to halt, then wait up to the specified"
+		.help = "request target to halt, then wait up to the specified "
 			"number of milliseconds (default 5000) for it to complete",
 		.usage = "[milliseconds]",
 	},
@@ -6233,7 +6302,7 @@ static const struct command_registration target_exec_command_handlers[] = {
 		.handler = handle_reset_command,
 		.mode = COMMAND_EXEC,
 		.usage = "[run|halt|init]",
-		.help = "Reset all targets into the specified mode."
+		.help = "Reset all targets into the specified mode. "
 			"Default reset mode is run, if not given.",
 	},
 	{
@@ -6318,7 +6387,7 @@ static const struct command_registration target_exec_command_handlers[] = {
 		.handler = handle_rbp_command,
 		.mode = COMMAND_EXEC,
 		.help = "remove breakpoint",
-		.usage = "address",
+		.usage = "'all' | address",
 	},
 	{
 		.name = "wp",

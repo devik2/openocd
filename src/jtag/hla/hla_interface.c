@@ -35,7 +35,7 @@
 
 #include <target/target.h>
 
-static struct hl_interface_s hl_if = { {0, 0, { 0 }, { 0 }, 0, HL_TRANSPORT_UNKNOWN, false, -1}, 0, 0 };
+static struct hl_interface_s hl_if = { {0, 0, { 0 }, { 0 }, HL_TRANSPORT_UNKNOWN, false, -1}, 0, 0 };
 
 int hl_interface_open(enum hl_transports tr)
 {
@@ -312,7 +312,7 @@ static const struct command_registration hl_interface_command_handlers[] = {
 	 .name = "hla_device_desc",
 	 .handler = &hl_interface_handle_device_desc_command,
 	 .mode = COMMAND_CONFIG,
-	 .help = "set the a device description of the adapter",
+	 .help = "set the device description of the adapter",
 	 .usage = "description_string",
 	 },
 	{
