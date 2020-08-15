@@ -99,12 +99,14 @@ static int aarch64_restore_system_control_reg(struct target *target)
 		case ARM_MODE_ABT:
 		case ARM_MODE_FIQ:
 		case ARM_MODE_IRQ:
+		case ARM_MODE_HYP:
 		case ARM_MODE_SYS:
 			instr = ARMV4_5_MCR(15, 0, 0, 1, 0, 0);
 			break;
 
 		default:
-			LOG_INFO("cannot read system control register in this mode");
+			LOG_ERROR("cannot read system control register in this mode: (%s : 0x%" PRIx32 ")",
+					armv8_mode_name(armv8->arm.core_mode), armv8->arm.core_mode);
 			return ERROR_FAIL;
 		}
 
@@ -172,6 +174,7 @@ static int aarch64_mmu_modify(struct target *target, int enable)
 	case ARM_MODE_ABT:
 	case ARM_MODE_FIQ:
 	case ARM_MODE_IRQ:
+	case ARM_MODE_HYP:
 	case ARM_MODE_SYS:
 		instr = ARMV4_5_MCR(15, 0, 0, 1, 0, 0);
 		break;
@@ -1033,12 +1036,14 @@ static int aarch64_post_debug_entry(struct target *target)
 	case ARM_MODE_ABT:
 	case ARM_MODE_FIQ:
 	case ARM_MODE_IRQ:
+	case ARM_MODE_HYP:
 	case ARM_MODE_SYS:
 		instr = ARMV4_5_MRC(15, 0, 0, 1, 0, 0);
 		break;
 
 	default:
-		LOG_INFO("cannot read system control register in this mode");
+		LOG_ERROR("cannot read system control register in this mode: (%s : 0x%" PRIx32 ")",
+				armv8_mode_name(armv8->arm.core_mode), armv8->arm.core_mode);
 		return ERROR_FAIL;
 	}
 
@@ -1176,7 +1181,7 @@ static int aarch64_step(struct target *target, int current, target_addr_t addres
 	if (saved_retval != ERROR_OK)
 		return saved_retval;
 
-	return aarch64_poll(target);
+	return ERROR_OK;
 }
 
 static int aarch64_restore_context(struct target *target, bool bpwp)
@@ -1263,9 +1268,32 @@ static int aarch64_set_breakpoint(struct target *target,
 			brp_list[brp_i].value);
 
 	} else if (breakpoint->type == BKPT_SOFT) {
+		uint32_t opcode;
 		uint8_t code[4];
 
-		buf_set_u32(code, 0, 32, armv8_opcode(armv8, ARMV8_OPC_HLT));
+		if (armv8_dpm_get_core_state(&armv8->dpm) == ARM_STATE_AARCH64) {
+			opcode = ARMV8_HLT(11);
+
+			if (breakpoint->length != 4)
+				LOG_ERROR("bug: breakpoint length should be 4 in AArch64 mode");
+		} else {
+			/**
+			 * core_state is ARM_STATE_ARM
+			 * in that case the opcode depends on breakpoint length:
+			 *  - if length == 4 => A32 opcode
+			 *  - if length == 2 => T32 opcode
+			 *  - if length == 3 => T32 opcode (refer to gdb doc : ARM-Breakpoint-Kinds)
+			 *    in that case the length should be changed from 3 to 4 bytes
+			 **/
+			opcode = (breakpoint->length == 4) ? ARMV8_HLT_A1(11) :
+					(uint32_t) (ARMV8_HLT_T1(11) | ARMV8_HLT_T1(11) << 16);
+
+			if (breakpoint->length == 3)
+				breakpoint->length = 4;
+		}
+
+		buf_set_u32(code, 0, 32, opcode);
+
 		retval = target_read_memory(target,
 				breakpoint->address & 0xFFFFFFFFFFFFFFFE,
 				breakpoint->length, 1,
@@ -2469,7 +2497,7 @@ static int aarch64_jim_configure(struct target *target, Jim_GetOptInfo *goi)
 	 * Call adiv5_jim_configure() to parse the common DAP options
 	 * It will return JIM_CONTINUE if it didn't find any known
 	 * options, JIM_OK if it correctly parsed the topmost option
-	 * and JIM_ERR if an error occured during parameter evaluation.
+	 * and JIM_ERR if an error occurred during parameter evaluation.
 	 * For JIM_CONTINUE, we check our own params.
 	 */
 	e = adiv5_jim_configure(target, goi);
@@ -2759,7 +2787,16 @@ static const struct command_registration aarch64_exec_command_handlers[] = {
 	COMMAND_REGISTRATION_DONE
 };
 
+extern const struct command_registration semihosting_common_handlers[];
+
 static const struct command_registration aarch64_command_handlers[] = {
+	{
+		.name = "arm",
+		.mode = COMMAND_ANY,
+		.help = "ARM Command Group",
+		.usage = "",
+		.chain = semihosting_common_handlers
+	},
 	{
 		.chain = armv8_command_handlers,
 	},

@@ -381,7 +381,7 @@ static void usbprog_jtag_close(struct usbprog_jtag *usbprog_jtag)
 static unsigned char usbprog_jtag_message(struct usbprog_jtag *usbprog_jtag, char *msg, int msglen)
 {
 	int res = usb_bulk_write(usbprog_jtag->usb_handle, 3, msg, msglen, 100);
-	if ((msg[0] == 2) || (msg[0] == 1) || (msg[0] == 4) || (msg[0] == 0) ||	\
+	if ((msg[0] == 2) || (msg[0] == 1) || (msg[0] == 4) || (msg[0] == 0) ||
 	    (msg[0] == 6) || (msg[0] == 0x0A) || (msg[0] == 9))
 		return 1;
 	if (res == msglen) {
@@ -403,11 +403,11 @@ static void usbprog_jtag_init(struct usbprog_jtag *usbprog_jtag)
 
 static void usbprog_jtag_write_and_read(struct usbprog_jtag *usbprog_jtag, char *buffer, int size)
 {
-	char tmp[64];	/* fastes packet size for usb controller */
+	char tmp[64];	/* fastest packet size for usb controller */
 	int send_bits, bufindex = 0, fillindex = 0, i, loops;
 
 	char swap;
-	/* 61 byte can be transfered (488 bit) */
+	/* 61 byte can be transferred (488 bit) */
 
 	while (size > 0) {
 		if (size > 488) {
@@ -449,11 +449,11 @@ static void usbprog_jtag_write_and_read(struct usbprog_jtag *usbprog_jtag, char 
 
 static void usbprog_jtag_read_tdo(struct usbprog_jtag *usbprog_jtag, char *buffer, int size)
 {
-	char tmp[64];	/* fastes packet size for usb controller */
+	char tmp[64];	/* fastest packet size for usb controller */
 	int send_bits, fillindex = 0, i, loops;
 
 	char swap;
-	/* 61 byte can be transfered (488 bit) */
+	/* 61 byte can be transferred (488 bit) */
 
 	while (size > 0) {
 		if (size > 488) {
@@ -490,10 +490,10 @@ static void usbprog_jtag_read_tdo(struct usbprog_jtag *usbprog_jtag, char *buffe
 
 static void usbprog_jtag_write_tdi(struct usbprog_jtag *usbprog_jtag, char *buffer, int size)
 {
-	char tmp[64];	/* fastes packet size for usb controller */
+	char tmp[64];	/* fastest packet size for usb controller */
 	int send_bits, bufindex = 0, i, loops;
 
-	/* 61 byte can be transfered (488 bit) */
+	/* 61 byte can be transferred (488 bit) */
 	while (size > 0) {
 		if (size > 488) {
 			send_bits = 488;
@@ -596,11 +596,16 @@ static void usbprog_jtag_tms_send(struct usbprog_jtag *usbprog_jtag)
 	}
 }
 
-struct jtag_interface usbprog_interface = {
+static struct jtag_interface usbprog_interface = {
+	.execute_queue = usbprog_execute_queue,
+};
+
+struct adapter_driver usbprog_adapter_driver = {
 	.name = "usbprog",
 	.transports = jtag_only,
 
-	.execute_queue = usbprog_execute_queue,
 	.init = usbprog_init,
-	.quit = usbprog_quit
+	.quit = usbprog_quit,
+
+	.jtag_ops = &usbprog_interface,
 };

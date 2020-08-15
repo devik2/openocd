@@ -681,6 +681,10 @@ static int dpmv8_read_reg(struct arm_dpm *dpm, struct reg *r, unsigned regnum)
 			LOG_DEBUG("READ: %s, hvalue=%16.8llx", r->name, (unsigned long long) hvalue);
 		}
 	}
+
+	if (retval != ERROR_OK)
+		LOG_ERROR("Failed to read %s register", r->name);
+
 	return retval;
 }
 
@@ -720,11 +724,14 @@ static int dpmv8_write_reg(struct arm_dpm *dpm, struct reg *r, unsigned regnum)
 		}
 	}
 
+	if (retval != ERROR_OK)
+		LOG_ERROR("Failed to write %s register", r->name);
+
 	return retval;
 }
 
 /**
- * Read basic registers of the the current context:  R0 to R15, and CPSR;
+ * Read basic registers of the current context:  R0 to R15, and CPSR;
  * sets the core mode (such as USR or IRQ) and state (such as ARM or Thumb).
  * In normal operation this is called on entry to halting debug state,
  * possibly after some other operations supporting restore of debug state
@@ -1464,10 +1471,10 @@ int armv8_dpm_setup(struct arm_dpm *dpm)
 	/* FIXME add vector catch support */
 
 	dpm->nbp = 1 + ((dpm->didr >> 12) & 0xf);
-	dpm->dbp = calloc(dpm->nbp, sizeof *dpm->dbp);
+	dpm->dbp = calloc(dpm->nbp, sizeof(*dpm->dbp));
 
 	dpm->nwp = 1 + ((dpm->didr >> 20) & 0xf);
-	dpm->dwp = calloc(dpm->nwp, sizeof *dpm->dwp);
+	dpm->dwp = calloc(dpm->nwp, sizeof(*dpm->dwp));
 
 	if (!dpm->dbp || !dpm->dwp) {
 		free(dpm->dbp);

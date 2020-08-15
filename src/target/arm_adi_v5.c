@@ -51,7 +51,7 @@
  * is set in the DP_CTRL_STAT register, the SSTICKYORUN status is set and
  * further AP operations will fail.  There are two basic methods to avoid
  * such overrun errors.  One involves polling for status instead of using
- * transaction piplining.  The other involves adding delays to ensure the
+ * transaction pipelining.  The other involves adding delays to ensure the
  * AP has enough time to complete one operation before starting the next
  * one.  (For JTAG these delays are controlled by memaccess_tck.)
  */
@@ -804,26 +804,9 @@ int mem_ap_init(struct adiv5_ap *ap)
  */
 int dap_to_swd(struct adiv5_dap *dap)
 {
-	int retval;
-
 	LOG_DEBUG("Enter SWD mode");
 
-	if (transport_is_jtag()) {
-		retval =  jtag_add_tms_seq(swd_seq_jtag_to_swd_len,
-				swd_seq_jtag_to_swd, TAP_INVALID);
-		if (retval == ERROR_OK)
-			retval = jtag_execute_queue();
-		return retval;
-	}
-
-	if (transport_is_swd()) {
-		const struct swd_driver *swd = adiv5_dap_swd_driver(dap);
-
-		return swd->switch_seq(JTAG_TO_SWD);
-	}
-
-	LOG_ERROR("Nor JTAG nor SWD transport");
-	return ERROR_FAIL;
+	return dap_send_sequence(dap, JTAG_TO_SWD);
 }
 
 /**
@@ -839,26 +822,9 @@ int dap_to_swd(struct adiv5_dap *dap)
  */
 int dap_to_jtag(struct adiv5_dap *dap)
 {
-	int retval;
-
 	LOG_DEBUG("Enter JTAG mode");
 
-	if (transport_is_jtag()) {
-		retval = jtag_add_tms_seq(swd_seq_swd_to_jtag_len,
-				swd_seq_swd_to_jtag, TAP_RESET);
-		if (retval == ERROR_OK)
-			retval = jtag_execute_queue();
-		return retval;
-	}
-
-	if (transport_is_swd()) {
-		const struct swd_driver *swd = adiv5_dap_swd_driver(dap);
-
-		return swd->switch_seq(SWD_TO_JTAG);
-	}
-
-	LOG_ERROR("Nor JTAG nor SWD transport");
-	return ERROR_FAIL;
+	return dap_send_sequence(dap, SWD_TO_JTAG);
 }
 
 /* CID interpretation -- see ARM IHI 0029B section 3
@@ -906,7 +872,7 @@ int dap_find_ap(struct adiv5_dap *dap, enum ap_type type_to_find, struct adiv5_a
 		 *  3-0  : AP Type (0=JTAG-AP 1=AHB-AP 2=APB-AP 4=AXI-AP)
 		 */
 
-		/* Reading register for a non-existant AP should not cause an error,
+		/* Reading register for a non-existent AP should not cause an error,
 		 * but just to be sure, try to continue searching if an error does happen.
 		 */
 		if ((retval == ERROR_OK) &&                  /* Register read success */
@@ -1106,21 +1072,23 @@ static const struct {
 	{ ARM_ID, 0x00c, "Cortex-M4 SCS",              "(System Control Space)", },
 	{ ARM_ID, 0x00d, "CoreSight ETM11",            "(Embedded Trace)", },
 	{ ARM_ID, 0x00e, "Cortex-M7 FPB",              "(Flash Patch and Breakpoint)", },
+	{ ARM_ID, 0x470, "Cortex-M1 ROM",              "(ROM Table)", },
+	{ ARM_ID, 0x471, "Cortex-M0 ROM",              "(ROM Table)", },
 	{ ARM_ID, 0x490, "Cortex-A15 GIC",             "(Generic Interrupt Controller)", },
 	{ ARM_ID, 0x4a1, "Cortex-A53 ROM",             "(v8 Memory Map ROM Table)", },
 	{ ARM_ID, 0x4a2, "Cortex-A57 ROM",             "(ROM Table)", },
 	{ ARM_ID, 0x4a3, "Cortex-A53 ROM",             "(v7 Memory Map ROM Table)", },
 	{ ARM_ID, 0x4a4, "Cortex-A72 ROM",             "(ROM Table)", },
 	{ ARM_ID, 0x4a9, "Cortex-A9 ROM",              "(ROM Table)", },
+	{ ARM_ID, 0x4aa, "Cortex-A35 ROM",             "(v8 Memory Map ROM Table)", },
 	{ ARM_ID, 0x4af, "Cortex-A15 ROM",             "(ROM Table)", },
+	{ ARM_ID, 0x4b5, "Cortex-R5 ROM",              "(ROM Table)", },
 	{ ARM_ID, 0x4c0, "Cortex-M0+ ROM",             "(ROM Table)", },
 	{ ARM_ID, 0x4c3, "Cortex-M3 ROM",              "(ROM Table)", },
 	{ ARM_ID, 0x4c4, "Cortex-M4 ROM",              "(ROM Table)", },
 	{ ARM_ID, 0x4c7, "Cortex-M7 PPB ROM",          "(Private Peripheral Bus ROM Table)", },
 	{ ARM_ID, 0x4c8, "Cortex-M7 ROM",              "(ROM Table)", },
-	{ ARM_ID, 0x4b5, "Cortex-R5 ROM",              "(ROM Table)", },
-	{ ARM_ID, 0x470, "Cortex-M1 ROM",              "(ROM Table)", },
-	{ ARM_ID, 0x471, "Cortex-M0 ROM",              "(ROM Table)", },
+	{ ARM_ID, 0x4e0, "Cortex-A35 ROM",             "(v7 Memory Map ROM Table)", },
 	{ ARM_ID, 0x906, "CoreSight CTI",              "(Cross Trigger)", },
 	{ ARM_ID, 0x907, "CoreSight ETB",              "(Trace Buffer)", },
 	{ ARM_ID, 0x908, "CoreSight CSTF",             "(Trace Funnel)", },
@@ -1163,6 +1131,7 @@ static const struct {
 	{ ARM_ID, 0x9d3, "Cortex-A53 PMU",             "(Performance Monitor Unit)", },
 	{ ARM_ID, 0x9d7, "Cortex-A57 PMU",             "(Performance Monitor Unit)", },
 	{ ARM_ID, 0x9d8, "Cortex-A72 PMU",             "(Performance Monitor Unit)", },
+	{ ARM_ID, 0x9da, "Cortex-A35 PMU/CTI/ETM",     "(Performance Monitor Unit/Cross Trigger/ETM)", },
 	{ ARM_ID, 0xc05, "Cortex-A5 Debug",            "(Debug Unit)", },
 	{ ARM_ID, 0xc07, "Cortex-A7 Debug",            "(Debug Unit)", },
 	{ ARM_ID, 0xc08, "Cortex-A8 Debug",            "(Debug Unit)", },
@@ -1173,6 +1142,7 @@ static const struct {
 	{ ARM_ID, 0xc15, "Cortex-R5 Debug",            "(Debug Unit)", },
 	{ ARM_ID, 0xc17, "Cortex-R7 Debug",            "(Debug Unit)", },
 	{ ARM_ID, 0xd03, "Cortex-A53 Debug",           "(Debug Unit)", },
+	{ ARM_ID, 0xd04, "Cortex-A35 Debug",           "(Debug Unit)", },
 	{ ARM_ID, 0xd07, "Cortex-A57 Debug",           "(Debug Unit)", },
 	{ ARM_ID, 0xd08, "Cortex-A72 Debug",           "(Debug Unit)", },
 	{ 0x097,  0x9af, "MSP432 ROM",                 "(ROM Table)" },
@@ -1183,8 +1153,8 @@ static const struct {
 	{ 0x0E5,  0x000, "SHARC+/Blackfin+",           "", },
 	{ 0x0F0,  0x440, "Qualcomm QDSS Component v1", "(Qualcomm Designed CoreSight Component v1)", },
 	{ 0x3eb,  0x181, "Tegra 186 ROM",              "(ROM Table)", },
-	{ 0x3eb,  0x211, "Tegra 210 ROM",              "(ROM Table)", },
 	{ 0x3eb,  0x202, "Denver ETM",                 "(Denver Embedded Trace)", },
+	{ 0x3eb,  0x211, "Tegra 210 ROM",              "(ROM Table)", },
 	{ 0x3eb,  0x302, "Denver Debug",               "(Debug Unit)", },
 	{ 0x3eb,  0x402, "Denver PMU",                 "(Performance Monitor Unit)", },
 	/* legacy comment: 0x113: what? */
@@ -1644,8 +1614,10 @@ COMMAND_HANDLER(handle_dap_info_command)
 		break;
 	case 1:
 		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], apsel);
-		if (apsel > DP_APSEL_MAX)
-			return ERROR_COMMAND_SYNTAX_ERROR;
+		if (apsel > DP_APSEL_MAX) {
+			command_print(CMD, "Invalid AP number");
+			return ERROR_COMMAND_ARGUMENT_INVALID;
+		}
 		break;
 	default:
 		return ERROR_COMMAND_SYNTAX_ERROR;
@@ -1667,8 +1639,10 @@ COMMAND_HANDLER(dap_baseaddr_command)
 	case 1:
 		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], apsel);
 		/* AP address is in bits 31:24 of DP_SELECT */
-		if (apsel > DP_APSEL_MAX)
-			return ERROR_COMMAND_SYNTAX_ERROR;
+		if (apsel > DP_APSEL_MAX) {
+			command_print(CMD, "Invalid AP number");
+			return ERROR_COMMAND_ARGUMENT_INVALID;
+		}
 		break;
 	default:
 		return ERROR_COMMAND_SYNTAX_ERROR;
@@ -1726,8 +1700,10 @@ COMMAND_HANDLER(dap_apsel_command)
 	case 1:
 		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], apsel);
 		/* AP address is in bits 31:24 of DP_SELECT */
-		if (apsel > DP_APSEL_MAX)
-			return ERROR_COMMAND_SYNTAX_ERROR;
+		if (apsel > DP_APSEL_MAX) {
+			command_print(CMD, "Invalid AP number");
+			return ERROR_COMMAND_ARGUMENT_INVALID;
+		}
 		break;
 	default:
 		return ERROR_COMMAND_SYNTAX_ERROR;
@@ -1756,7 +1732,7 @@ COMMAND_HANDLER(dap_apcsw_command)
 
 		if (csw_val & (CSW_SIZE_MASK | CSW_ADDRINC_MASK)) {
 			LOG_ERROR("CSW value cannot include 'Size' and 'AddrInc' bit-fields");
-			return ERROR_COMMAND_SYNTAX_ERROR;
+			return ERROR_COMMAND_ARGUMENT_INVALID;
 		}
 		apcsw = csw_val;
 		break;
@@ -1765,7 +1741,7 @@ COMMAND_HANDLER(dap_apcsw_command)
 		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], csw_mask);
 		if (csw_mask & (CSW_SIZE_MASK | CSW_ADDRINC_MASK)) {
 			LOG_ERROR("CSW mask cannot include 'Size' and 'AddrInc' bit-fields");
-			return ERROR_COMMAND_SYNTAX_ERROR;
+			return ERROR_COMMAND_ARGUMENT_INVALID;
 		}
 		apcsw = (apcsw & ~csw_mask) | (csw_val & csw_mask);
 		break;
@@ -1792,8 +1768,10 @@ COMMAND_HANDLER(dap_apid_command)
 	case 1:
 		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], apsel);
 		/* AP address is in bits 31:24 of DP_SELECT */
-		if (apsel > DP_APSEL_MAX)
-			return ERROR_COMMAND_SYNTAX_ERROR;
+		if (apsel > DP_APSEL_MAX) {
+			command_print(CMD, "Invalid AP number");
+			return ERROR_COMMAND_ARGUMENT_INVALID;
+		}
 		break;
 	default:
 		return ERROR_COMMAND_SYNTAX_ERROR;
@@ -1823,13 +1801,18 @@ COMMAND_HANDLER(dap_apreg_command)
 
 	COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], apsel);
 	/* AP address is in bits 31:24 of DP_SELECT */
-	if (apsel > DP_APSEL_MAX)
-		return ERROR_COMMAND_SYNTAX_ERROR;
+	if (apsel > DP_APSEL_MAX) {
+		command_print(CMD, "Invalid AP number");
+		return ERROR_COMMAND_ARGUMENT_INVALID;
+	}
+
 	ap = dap_ap(dap, apsel);
 
 	COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], reg);
-	if (reg >= 256 || (reg & 3))
-		return ERROR_COMMAND_SYNTAX_ERROR;
+	if (reg >= 256 || (reg & 3)) {
+		command_print(CMD, "Invalid reg value (should be less than 256 and 4 bytes aligned)");
+		return ERROR_COMMAND_ARGUMENT_INVALID;
+	}
 
 	if (CMD_ARGC == 3) {
 		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[2], value);
@@ -1873,8 +1856,10 @@ COMMAND_HANDLER(dap_dpreg_command)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
 	COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], reg);
-	if (reg >= 256 || (reg & 3))
-		return ERROR_COMMAND_SYNTAX_ERROR;
+	if (reg >= 256 || (reg & 3)) {
+		command_print(CMD, "Invalid reg value (should be less than 256 and 4 bytes aligned)");
+		return ERROR_COMMAND_ARGUMENT_INVALID;
+	}
 
 	if (CMD_ARGC == 2) {
 		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], value);
@@ -1897,24 +1882,8 @@ COMMAND_HANDLER(dap_dpreg_command)
 COMMAND_HANDLER(dap_ti_be_32_quirks_command)
 {
 	struct adiv5_dap *dap = adiv5_get_dap(CMD_DATA);
-	uint32_t enable = dap->ti_be_32_quirks;
-
-	switch (CMD_ARGC) {
-	case 0:
-		break;
-	case 1:
-		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], enable);
-		if (enable > 1)
-			return ERROR_COMMAND_SYNTAX_ERROR;
-		break;
-	default:
-		return ERROR_COMMAND_SYNTAX_ERROR;
-	}
-	dap->ti_be_32_quirks = enable;
-	command_print(CMD, "TI BE-32 quirks mode %s",
-		enable ? "enabled" : "disabled");
-
-	return 0;
+	return CALL_COMMAND_HANDLER(handle_command_parse_bool, &dap->ti_be_32_quirks,
+		"TI BE-32 quirks mode");
 }
 
 const struct command_registration dap_instance_commands[] = {
