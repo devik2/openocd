@@ -218,6 +218,16 @@ static const struct stm32l4_part_info stm32l4_parts[] = {
 	  .fsize_addr            = 0x1FFF75E0,
 	},
 	{
+	  .id                    = 0x456,
+	  .revs                  = stm32_461_revs, // fake
+	  .num_revs              = ARRAY_SIZE(stm32_461_revs),
+	  .device_str            = "STM32G05/G06xx",
+	  .max_flash_size_kb     = 64,
+	  .has_dual_bank         = false,
+	  .flash_regs_base       = 0x40022000,
+	  .fsize_addr            = 0x1FFF75E0,
+	},
+	{
 	  .id                    = 0x460,
 	  .revs                  = stm32_460_revs,
 	  .num_revs              = ARRAY_SIZE(stm32_460_revs),
@@ -947,6 +957,7 @@ static int stm32l4_probe(struct flash_bank *bank)
 		}
 		break;
 	case 0x435: /* STM32L43/L44xx */
+	case 0x456: /* STM32G05/G06xx */
 	case 0x460: /* STM32G07/G08xx */
 	case 0x462: /* STM32L45/L46xx */
 	case 0x464: /* STM32L41/L42xx */
