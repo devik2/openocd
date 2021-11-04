@@ -283,6 +283,7 @@ static const struct stm32l4_part_info stm32l4_parts[] = {
 	  .max_flash_size_kb     = 64,
 	  .has_dual_bank         = false,
 	  .flash_regs_base       = 0x40022000,
+	  .default_flash_regs    = stm32l4_flash_regs,
 	  .fsize_addr            = 0x1FFF75E0,
 	},
 	{
