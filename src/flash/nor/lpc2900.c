@@ -174,7 +174,7 @@ static uint32_t lpc2900_read_security_status(struct flash_bank *bank);
 static uint32_t lpc2900_run_bist128(struct flash_bank *bank,
 		uint32_t addr_from, uint32_t addr_to,
 		uint32_t signature[4]);
-static uint32_t lpc2900_address2sector(struct flash_bank *bank, uint32_t offset);
+static unsigned int lpc2900_address2sector(struct flash_bank *bank, uint32_t offset);
 static uint32_t lpc2900_calc_tr(uint32_t clock_var, uint32_t time_var);
 
 /***********************  Helper functions  **************************/
@@ -453,8 +453,8 @@ static int lpc2900_write_index_page(struct flash_bank *bank,
 /**
  * Calculate FPTR.TR register value for desired program/erase time.
  *
- * @param clock System clock in Hz
- * @param time Program/erase time in µs
+ * @param clock_var System clock in Hz
+ * @param time_var Program/erase time in µs
  */
 static uint32_t lpc2900_calc_tr(uint32_t clock_var, uint32_t time_var)
 {
@@ -635,9 +635,9 @@ COMMAND_HANDLER(lpc2900_handle_write_custom_command)
 
 	/* The image will always start at offset 0 */
 	struct image image;
-	image.base_address_set = 1;
+	image.base_address_set = true;
 	image.base_address = 0;
-	image.start_address_set = 0;
+	image.start_address_set = false;
 
 	const char *filename = CMD_ARGV[1];
 	const char *type = (CMD_ARGC >= 3) ? CMD_ARGV[2] : NULL;

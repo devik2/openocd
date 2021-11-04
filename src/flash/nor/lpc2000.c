@@ -1103,9 +1103,9 @@ static int lpc2000_write(struct flash_bank *bank, const uint8_t *buffer, uint32_
 
 		uint32_t original_value = buf_get_u32(buffer + (lpc2000_info->checksum_vector * 4), 0, 32);
 		if (original_value != checksum) {
-			LOG_WARNING("Verification will fail since checksum in image (0x%8.8" PRIx32 ") to be written to flash is "
+			LOG_WARNING("Boot verification checksum in image (0x%8.8" PRIx32 ") to be written to flash is "
 					"different from calculated vector checksum (0x%8.8" PRIx32 ").", original_value, checksum);
-			LOG_WARNING("To remove this warning modify build tools on developer PC to inject correct LPC vector "
+			LOG_WARNING("OpenOCD will write the correct checksum. To remove this warning modify build tools on developer PC to inject correct LPC vector "
 					"checksum.");
 		}
 
@@ -1556,7 +1556,7 @@ static int get_lpc2000_info(struct flash_bank *bank, char *buf, int buf_size)
 {
 	struct lpc2000_flash_bank *lpc2000_info = bank->driver_priv;
 
-	snprintf(buf, buf_size, "lpc2000 flash driver variant: %i, clk: %" PRIi32 "kHz", lpc2000_info->variant,
+	snprintf(buf, buf_size, "lpc2000 flash driver variant: %i, clk: %" PRIu32 "kHz", lpc2000_info->variant,
 			lpc2000_info->cclk);
 
 	return ERROR_OK;

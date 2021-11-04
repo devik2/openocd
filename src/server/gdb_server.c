@@ -969,15 +969,6 @@ static int gdb_new_connection(struct connection *connection)
 	breakpoint_clear_target(target);
 	watchpoint_clear_target(target);
 
-	if (target->rtos) {
-		/* clean previous rtos session if supported*/
-		if (target->rtos->type->clean)
-			target->rtos->type->clean(target);
-
-		/* update threads */
-		rtos_update_threads(target);
-	}
-
 	/* remove the initial ACK from the incoming buffer */
 	retval = gdb_get_char(connection, &initial_ack);
 	if (retval != ERROR_OK)
@@ -989,6 +980,15 @@ static int gdb_new_connection(struct connection *connection)
 	if (initial_ack != '+')
 		gdb_putback_char(connection, initial_ack);
 	target_call_event_callbacks(target, TARGET_EVENT_GDB_ATTACH);
+
+	if (target->rtos) {
+		/* clean previous rtos session if supported*/
+		if (target->rtos->type->clean)
+			target->rtos->type->clean(target);
+
+		/* update threads */
+		rtos_update_threads(target);
+	}
 
 	if (gdb_use_memory_map) {
 		/* Connect must fail if the memory map can't be set up correctly.
@@ -1025,7 +1025,7 @@ static int gdb_new_connection(struct connection *connection)
 		return ERROR_TARGET_NOT_EXAMINED;
 	}
 
-	if (target->state == TARGET_HALTED)
+	if (target->state != TARGET_HALTED)
 		LOG_WARNING("GDB connection %d on target %s not halted",
 					gdb_actual_connections, target_name(target));
 
@@ -1067,11 +1067,8 @@ static int gdb_connection_closed(struct connection *connection)
 	/* if this connection registered a debug-message receiver delete it */
 	delete_debug_msg_receiver(connection->cmd_ctx, target);
 
-	if (connection->priv) {
-		free(connection->priv);
-		connection->priv = NULL;
-	} else
-		LOG_ERROR("BUG: connection->priv == NULL");
+	free(connection->priv);
+	connection->priv = NULL;
 
 	target_unregister_event_callback(gdb_target_callback_event_handler, connection);
 
@@ -1192,7 +1189,7 @@ static int gdb_get_registers_packet(struct connection *connection,
 		return gdb_error(connection, retval);
 
 	for (i = 0; i < reg_list_size; i++) {
-		if (reg_list[i] == NULL || reg_list[i]->exist == false)
+		if (reg_list[i] == NULL || reg_list[i]->exist == false || reg_list[i]->hidden)
 			continue;
 		reg_packet_size += DIV_ROUND_UP(reg_list[i]->size, 8) * 2;
 	}
@@ -1206,7 +1203,7 @@ static int gdb_get_registers_packet(struct connection *connection,
 	reg_packet_p = reg_packet;
 
 	for (i = 0; i < reg_list_size; i++) {
-		if (reg_list[i] == NULL || reg_list[i]->exist == false)
+		if (reg_list[i] == NULL || reg_list[i]->exist == false || reg_list[i]->hidden)
 			continue;
 		if (!reg_list[i]->valid) {
 			retval = reg_list[i]->type->get(reg_list[i]);
@@ -1335,7 +1332,7 @@ static int gdb_get_register_packet(struct connection *connection,
 		}
 	}
 
-	reg_packet = malloc(DIV_ROUND_UP(reg_list[reg_num]->size, 8) * 2 + 1); /* plus one for string termination null */
+	reg_packet = calloc(DIV_ROUND_UP(reg_list[reg_num]->size, 8) * 2 + 1, 1); /* plus one for string termination null */
 
 	gdb_str_to_target(target, reg_packet, reg_list[reg_num]);
 
@@ -1391,8 +1388,8 @@ static int gdb_set_register_packet(struct connection *connection,
 	}
 
 	if (chars != (DIV_ROUND_UP(reg_list[reg_num]->size, 8) * 2)) {
-		LOG_ERROR("gdb sent %d bits for a %d-bit register (%s)",
-				(int) chars * 4, reg_list[reg_num]->size, reg_list[reg_num]->name);
+		LOG_ERROR("gdb sent %zu bits for a %" PRIu32 "-bit register (%s)",
+				chars * 4, reg_list[reg_num]->size, reg_list[reg_num]->name);
 		free(bin_buf);
 		free(reg_list);
 		return ERROR_SERVER_REMOTE_CLOSED;
@@ -1758,8 +1755,7 @@ static __attribute__ ((format (PRINTF_ATTRIBUTE_FORMAT, 5, 6))) void xml_printf(
 			char *t = *xml;
 			*xml = realloc(*xml, *size);
 			if (*xml == NULL) {
-				if (t)
-					free(t);
+				free(t);
 				*retval = ERROR_SERVER_REMOTE_CLOSED;
 				return;
 			}
@@ -2054,7 +2050,7 @@ static int gdb_generate_reg_type_description(struct target *target,
 		}
 		/* <vector id="id" type="type" count="count"/> */
 		xml_printf(&retval, tdesc, pos, size,
-				"<vector id=\"%s\" type=\"%s\" count=\"%d\"/>\n",
+				"<vector id=\"%s\" type=\"%s\" count=\"%" PRIu32 "\"/>\n",
 				type->id, type->reg_type_vector->type->id,
 				type->reg_type_vector->count);
 
@@ -2101,11 +2097,11 @@ static int gdb_generate_reg_type_description(struct target *target,
 			 *  <field name="name" start="start" end="end"/> ...
 			 * </struct> */
 			xml_printf(&retval, tdesc, pos, size,
-					"<struct id=\"%s\" size=\"%d\">\n",
+					"<struct id=\"%s\" size=\"%" PRIu32 "\">\n",
 					type->id, type->reg_type_struct->size);
 			while (field != NULL) {
 				xml_printf(&retval, tdesc, pos, size,
-						"<field name=\"%s\" start=\"%d\" end=\"%d\" type=\"%s\" />\n",
+						"<field name=\"%s\" start=\"%" PRIu32 "\" end=\"%" PRIu32 "\" type=\"%s\" />\n",
 						field->name, field->bitfield->start, field->bitfield->end,
 						gdb_get_reg_type_name(field->bitfield->type));
 
@@ -2146,14 +2142,14 @@ static int gdb_generate_reg_type_description(struct target *target,
 		 *  <field name="name" start="start" end="end"/> ...
 		 * </flags> */
 		xml_printf(&retval, tdesc, pos, size,
-				"<flags id=\"%s\" size=\"%d\">\n",
+				"<flags id=\"%s\" size=\"%" PRIu32 "\">\n",
 				type->id, type->reg_type_flags->size);
 
 		struct reg_data_type_flags_field *field;
 		field = type->reg_type_flags->fields;
 		while (field != NULL) {
 			xml_printf(&retval, tdesc, pos, size,
-					"<field name=\"%s\" start=\"%d\" end=\"%d\" type=\"%s\" />\n",
+					"<field name=\"%s\" start=\"%" PRIu32 "\" end=\"%" PRIu32 "\" type=\"%s\" />\n",
 					field->name, field->bitfield->start, field->bitfield->end,
 					gdb_get_reg_type_name(field->bitfield->type));
 
@@ -2180,7 +2176,7 @@ static int get_reg_features_list(struct target *target, char const **feature_lis
 	*feature_list = calloc(1, sizeof(char *));
 
 	for (int i = 0; i < reg_list_size; i++) {
-		if (reg_list[i]->exist == false)
+		if (reg_list[i]->exist == false || reg_list[i]->hidden)
 			continue;
 
 		if (reg_list[i]->feature != NULL
@@ -2274,7 +2270,7 @@ static int gdb_generate_target_description(struct target *target, char **tdesc_o
 			int i;
 			for (i = 0; i < reg_list_size; i++) {
 
-				if (reg_list[i]->exist == false)
+				if (reg_list[i]->exist == false || reg_list[i]->hidden)
 					continue;
 
 				if (strcmp(reg_list[i]->feature->name, features[current_feature]))
@@ -2306,9 +2302,9 @@ static int gdb_generate_target_description(struct target *target, char **tdesc_o
 				xml_printf(&retval, &tdesc, &pos, &size,
 						"<reg name=\"%s\"", reg_list[i]->name);
 				xml_printf(&retval, &tdesc, &pos, &size,
-						" bitsize=\"%d\"", reg_list[i]->size);
+						" bitsize=\"%" PRIu32 "\"", reg_list[i]->size);
 				xml_printf(&retval, &tdesc, &pos, &size,
-						" regnum=\"%d\"", reg_list[i]->number);
+						" regnum=\"%" PRIu32 "\"", reg_list[i]->number);
 				if (reg_list[i]->caller_save)
 					xml_printf(&retval, &tdesc, &pos, &size,
 							" save-restore=\"yes\"");
@@ -2520,7 +2516,7 @@ static int gdb_get_thread_list_chunk(struct target *target, char **thread_list,
 		transfer_type = 'l';
 
 	*chunk = malloc(length + 2 + 3);
-    /* Allocating extra 3 bytes prevents false positive valgrind report
+	/* Allocating extra 3 bytes prevents false positive valgrind report
 	 * of strlen(chunk) word access:
 	 * Invalid read of size 4
 	 * Address 0x4479934 is 44 bytes inside a block of size 45 alloc'd */
@@ -3512,8 +3508,8 @@ static int gdb_target_start(struct target *target, const char *port)
 	target->gdb_service = gdb_service;
 
 	ret = add_service("gdb",
-			port, 1, &gdb_new_connection, &gdb_input,
-			&gdb_connection_closed, gdb_service);
+			port, target->gdb_max_connections, &gdb_new_connection, &gdb_input,
+			&gdb_connection_closed, gdb_service, NULL);
 	/* initialize all targets gdb service with the same pointer */
 	{
 		struct target_list *head;

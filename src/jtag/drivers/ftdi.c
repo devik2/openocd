@@ -524,17 +524,19 @@ static int ftdi_reset(int trst, int srst)
 
 	LOG_DEBUG_IO("reset trst: %i srst %i", trst, srst);
 
-	if (trst == 1) {
-		if (sig_ntrst)
-			ftdi_set_signal(sig_ntrst, '0');
-		else
-			LOG_ERROR("Can't assert TRST: nTRST signal is not defined");
-	} else if (sig_ntrst && jtag_get_reset_config() & RESET_HAS_TRST &&
-			trst == 0) {
-		if (jtag_get_reset_config() & RESET_TRST_OPEN_DRAIN)
-			ftdi_set_signal(sig_ntrst, 'z');
-		else
-			ftdi_set_signal(sig_ntrst, '1');
+	if (!swd_mode) {
+		if (trst == 1) {
+			if (sig_ntrst)
+				ftdi_set_signal(sig_ntrst, '0');
+			else
+				LOG_ERROR("Can't assert TRST: nTRST signal is not defined");
+		} else if (sig_ntrst && jtag_get_reset_config() & RESET_HAS_TRST &&
+				trst == 0) {
+			if (jtag_get_reset_config() & RESET_TRST_OPEN_DRAIN)
+				ftdi_set_signal(sig_ntrst, 'z');
+			else
+				ftdi_set_signal(sig_ntrst, '1');
+		}
 	}
 
 	if (srst == 1) {
@@ -555,11 +557,11 @@ static int ftdi_reset(int trst, int srst)
 
 static void ftdi_execute_sleep(struct jtag_command *cmd)
 {
-	LOG_DEBUG_IO("sleep %" PRIi32, cmd->cmd.sleep->us);
+	LOG_DEBUG_IO("sleep %" PRIu32, cmd->cmd.sleep->us);
 
 	mpsse_flush(mpsse_ctx);
 	jtag_sleep(cmd->cmd.sleep->us);
-	LOG_DEBUG_IO("sleep %" PRIi32 " usec while in %s",
+	LOG_DEBUG_IO("sleep %" PRIu32 " usec while in %s",
 		cmd->cmd.sleep->us,
 		tap_state_name(tap_get_state()));
 }
@@ -709,8 +711,7 @@ static int ftdi_quit(void)
 COMMAND_HANDLER(ftdi_handle_device_desc_command)
 {
 	if (CMD_ARGC == 1) {
-		if (ftdi_device_desc)
-			free(ftdi_device_desc);
+		free(ftdi_device_desc);
 		ftdi_device_desc = strdup(CMD_ARGV[0]);
 	} else {
 		LOG_ERROR("expected exactly one argument to ftdi_device_desc <description>");
@@ -722,8 +723,7 @@ COMMAND_HANDLER(ftdi_handle_device_desc_command)
 COMMAND_HANDLER(ftdi_handle_serial_command)
 {
 	if (CMD_ARGC == 1) {
-		if (ftdi_serial)
-			free(ftdi_serial);
+		free(ftdi_serial);
 		ftdi_serial = strdup(CMD_ARGV[0]);
 	} else {
 		return ERROR_COMMAND_SYNTAX_ERROR;
@@ -1064,7 +1064,6 @@ static void ftdi_swd_swdio_en(bool enable)
 
 /**
  * Flush the MPSSE queue and process the SWD transaction queue
- * @param dap
  * @return
  */
 static int ftdi_swd_run_queue(void)
